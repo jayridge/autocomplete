@@ -2,37 +2,26 @@
 #include <simplehttp/simplehttp.h>
 #include "uthash.h"
 #include "utlist.h"
+#include "json/json.h"
 
 #define NAME        "autocomplete"
 #define VERSION     "0.1"
 #define DEBUG       1
 
 
-struct el_ctx {
-    char *key;
-    char *data;
-    int ref_count;
-    UT_hash_handle hh;
-};
-
 typedef struct el {
     char *key;
+    char *data;
     time_t when;
-    struct el_ctx *elx;
-    struct el *next, *prev;
+    int count;
+    UT_hash_handle hh;  /* handle for key hash */
+    UT_hash_handle rh;  /* handle for results hash */
 } el;
-
-struct el_result {
-    struct el *e;
-    int nelems;
-    UT_hash_handle hh;
-};
 
 struct namespace {
     char *name;
     int nelems;
-    el *head;
-    struct el_ctx *ctx_table;
+    struct el *elems;
     UT_hash_handle hh;
 };
 
@@ -51,88 +40,49 @@ struct namespace *get_namespace(char *namespace)
     return ns;
 }
 
-struct el_ctx *get_el_ctx(struct namespace *ns, char *key)
-{
-    struct el_ctx *elx = NULL;
-    if (ns && key) {
-        HASH_FIND_STR(ns->ctx_table, key, elx);
-    }
-    return elx;
+int key_sort(el *a, el *b) {
+    return strcmp(a->key, b->key);
 }
 
-/*
- *  First sort by key, then reverse chrono.
- */
-int keycmp(el *a, el *b) {
-    int rc = strcmp(a->key, b->key);
-    if (rc == 0) {
-        if (a->when > b->when) {
+int time_count_sort(el *a, el *b) {
+    if (a->when > b->when) {
+        return -1;
+    } else if (a->when < b->when) {
+        return 1;
+    } else {
+        if (a->count > b->count) {
             return -1;
-        } else if (a->when < b->when) {
+        } else if (a->count < b->count) {
             return 1;
         }
     }
-    return rc;
-}
-
-int prefix_time_cmp(el *a, el *b) {
-    fprintf(stderr, "prefix_time_cmp %s %s\n", a->key, b->key);
-    int rc = strncmp(a->key, b->key, strlen(b->key));
-    if (0 && rc == 0) {
-        if (a->when > b->when) {
-            return -1;
-        } else if (a->when < b->when) {
-            return 1;
-        }        
-    }
-    return rc;
-}
-
-/*
- * Reverse chrono for trimming.
- */
-int timecmp(el *a, el *b) {
-    if (a->when > b->when) {
-        return -1;
-    } else if (a->when < b->when) {
-        return 1;
-    }
     return 0;
-}
-
-/*
- * Reverse chrono then key.
- */
-int time_key_cmp(el *a, el *b) {
-    if (a->when > b->when) {
-        return -1;
-    } else if (a->when < b->when) {
-        return 1;
-    }
-    return strcmp(a->key, b->key);
 }
 
 void print_namespace(struct namespace *ns)
 {
     struct el *e;
-    DL_FOREACH(ns->head, e) {
-        fprintf(stderr, "%s %ld %s\n", e->key, e->when, (e->elx->data ? e->elx->data : "none"));
+    for(e=ns->elems; e != NULL; e=e->hh.next) {
+        fprintf(stderr, "%s %ld %s\n", e->key, e->when, (e->data ? e->data : "none"));
     }
 }
 
 void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 {
     struct evkeyvalq args;
-    char *namespace, *key, *data;
+    char *namespace, *key, *data, *ts;
     struct namespace *ns;
     struct el *e;
-    struct el_ctx *elx;
     time_t when = time(NULL);
     
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key = (char *)evhttp_find_header(&args, "key");
     data = (char *)evhttp_find_header(&args, "data");
+    ts = (char *)evhttp_find_header(&args, "ts");
+    if (ts) {
+        when = (time_t)strtol(ts, NULL, 10);
+    }
     
     if (DEBUG) {
         fprintf(stderr, "/put_cb %s %s\n", namespace, key);
@@ -151,33 +101,22 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         }
         
         /*
-         *  struct el_ctx
-         */
-        elx = get_el_ctx(ns, key);
-        if (!elx) {
-            elx = malloc(sizeof(*elx));
-            memset(elx, 0, sizeof(*elx));
-            elx->key = strdup(key);
-        }
-        if (data) {
-            if (elx->data) {
-                free(elx->data);
-            }
-            elx->data = strdup(data);
-        }
-        elx->ref_count += 1;
-        HASH_ADD_KEYPTR(hh, ns->ctx_table, elx->key, strlen(elx->key), elx);
-
-        /*
          *  struct el
          */
-        e = malloc(sizeof(*e));
-        memset(e, 0, sizeof(*e));
-        e->key = strdup(key);
+        HASH_FIND_STR(ns->elems, key, e);
+        if (!e) {
+            e = malloc(sizeof(*e));
+            memset(e, 0, sizeof(*e));
+            e->key = strdup(key);
+            HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
+            HASH_SORT(ns->elems, key_sort);
+        }
+        if (e->data) {
+            free(e->data);
+        }
+        e->data = (data ? strdup(data) : NULL);
         e->when = when;
-        e->elx = elx;
-        DL_APPEND(ns->head, e);
-        DL_SORT(ns->head, keycmp);
+        e->count += 1;
         
         /*
          *  TODO: resort and trim if reached max_elems.
@@ -186,7 +125,7 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         print_namespace(ns);
         evhttp_send_reply(req, HTTP_OK, "OK", evb);
     } else {
-        evbuffer_add_printf(evb, "missing argument: key\n");
+        evbuffer_add_printf(evb, "missing argument: [ key | namespace ]\n");
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_ARG_KEY", evb);
     }
     
@@ -197,11 +136,9 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 {
     struct evkeyvalq args;
     char *namespace, *key;
+    struct json_object *jsobj, *jsel, *jsresults;
+    struct el *e, *results = NULL;
     struct namespace *ns;
-    struct el *e, *eptr, etmp;
-    struct el_ctx *elx;
-    struct el_result *er, *results = NULL;
-    time_t when = time(NULL);
     
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
@@ -212,38 +149,30 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
     }
     
     if (namespace && key) {
+        jsobj = json_object_new_object();
+        json_object_object_add(jsobj, "namespace", json_object_new_string(namespace));
+        json_object_object_add(jsobj, "key", json_object_new_string(key));
+        jsresults = json_object_new_array();
         ns = get_namespace(namespace);
         if (ns) {
-            memset(&etmp, 0, sizeof(etmp));
-            etmp.key = key;
-            DL_SEARCH(ns->head, e, &etmp, prefix_time_cmp);
-            while (e) {
-                fprintf(stderr, "found %s %ld %p %p\n", e->key, e->when, e->next, e->prev);
-                HASH_FIND_STR(results, e->key, er);
-                if (!er) {
-                    er = malloc(sizeof(*er));
-                    er->e = e;
-                    HASH_ADD_KEYPTR(hh, results, er->e->key, strlen(er->e->key), er);
-                    fprintf(stderr, "new entry: %s\n", e->key);
-                }
-                er->nelems += 1;
-                e = e->next;
-                if (!e || strncmp(e->key, key, strlen(key)) != 0) {
-                    break;
-                }
+#define key_match(x) (strncmp(((struct el*)x)->key,key,strlen(key)) == 0)
+            HASH_SELECT(rh, results, hh, ns->elems, key_match);
+            HASH_SRT(rh, results, time_count_sort);
+            for (e=results; e != NULL; e=e->rh.next) {
+                jsel = json_object_new_object();
+                json_object_object_add(jsel, "key", json_object_new_string(e->key));
+                json_object_object_add(jsel, "when", json_object_new_int(e->when));
+                json_object_object_add(jsel, "count", json_object_new_int(e->count));
+                json_object_object_add(jsel, "data", json_object_new_string(e->data));
+                json_object_array_add(jsresults, jsel);
+                fprintf(stderr, "elem key %s\n", e->key);
             }
-            
-            HASH_SRT(hh, results, time_key_cmp);
-            for(er=results; er != NULL; er=(struct el_result*)(er->hh.next)) {
-                e = er->e;
-                fprintf(stderr, "RES: %s %ld %s\n", e->key, e->when, (e->elx->data ? e->elx->data : "none"));
-            }
-
-            /*
-             *  TODO: free the list.
-             */
+            HASH_CLEAR(rh, results);
         }
+        json_object_object_add(jsobj, "results", jsresults);
+        evbuffer_add_printf(evb, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", evb);
+        json_object_put(jsobj);
     } else {
         evbuffer_add_printf(evb, "missing argument: key\n");
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_ARG_KEY", evb);
