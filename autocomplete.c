@@ -59,6 +59,16 @@ int time_count_sort(el *a, el *b) {
     return 0;
 }
 
+void free_el(struct el *e)
+{
+    if (e) {
+        if (e->key) {
+            free(e->key);
+        }
+        free(e);
+    }
+}
+
 void print_namespace(struct namespace *ns)
 {
     struct el *e;
@@ -90,7 +100,7 @@ char *utf8_tolower(char *s, char *locale)
     
     // uchar tolower
     err = U_ZERO_ERROR;
-    u_strToLower(NULL, 0, (UChar *)buf, -1, locale, &err);
+    len2 = u_strToLower(NULL, 0, (UChar *)buf, -1, locale, &err);
     if (len2 > len) {
         buf = realloc(buf, len2+1);
     }
@@ -181,11 +191,115 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         print_namespace(ns);
         evhttp_send_reply(req, HTTP_OK, "OK", evb);
     } else {
-        evbuffer_add_printf(evb, "missing argument: [ key | namespace ]\n");
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_ARG_KEY", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
     }
     
     evhttp_clear_headers(&args);
+}
+
+void del_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+{
+    struct evkeyvalq args;
+    char *namespace, *locale, *qkey, *key = NULL;
+    struct el *e;
+    struct namespace *ns;
+    
+    evhttp_parse_query(req->uri, &args);
+    namespace = (char *)evhttp_find_header(&args, "namespace");
+    locale = (char *)evhttp_find_header(&args, "locale");
+    if (!locale) {
+        // "" for root locale, NULL for default
+        locale = "";
+    }
+    qkey = (char *)evhttp_find_header(&args, "key");
+    if (qkey) {
+        key = utf8_tolower(qkey, locale);
+    }
+    
+    if (DEBUG) {
+        fprintf(stderr, "/search_cb %s %s\n", namespace, key);
+    }
+    
+    if (namespace && key) {
+        ns = get_namespace(namespace);
+        if (ns) {
+            HASH_FIND_STR(ns->elems, key, e);
+            if (e) {
+                HASH_DEL(ns->elems, e);
+                free_el(e);
+                evhttp_send_reply(req, HTTP_OK, "OK", evb);
+            } else {
+                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", evb);
+            }
+        } else {
+            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", evb);            
+        }
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+    }
+    
+    evhttp_clear_headers(&args);
+    if (key) {
+        free(key);
+    }
+}
+
+void incr_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+{
+    struct evkeyvalq args;
+    char *namespace, *locale, *svalue, *qkey, *key = NULL;
+    struct el *e;
+    int value = 0;
+    struct namespace *ns;
+    
+    evhttp_parse_query(req->uri, &args);
+    namespace = (char *)evhttp_find_header(&args, "namespace");
+    locale = (char *)evhttp_find_header(&args, "locale");
+    if (!locale) {
+        // "" for root locale, NULL for default
+        locale = "";
+    }
+    qkey = (char *)evhttp_find_header(&args, "key");
+    if (qkey) {
+        key = utf8_tolower(qkey, locale);
+    }
+    svalue = (char *)evhttp_find_header(&args, "value");
+    if (svalue) {
+        value = atoi(svalue);
+        if (ctx) {  // this is a decr
+            value = -value;
+        }
+    }
+    
+    if (DEBUG) {
+        fprintf(stderr, "/incr_cb %s %s\n", namespace, key);
+    }
+    
+    if (namespace && key && value) {
+        ns = get_namespace(namespace);
+        if (ns) {
+            HASH_FIND_STR(ns->elems, key, e);
+            if (e) {
+                e->count += value;
+                if (e->count <= 0) {
+                    HASH_DEL(ns->elems, e);
+                    free_el(e);
+                }
+                evhttp_send_reply(req, HTTP_OK, "OK", evb);
+            } else {
+                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", evb);
+            }
+        } else {
+            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", evb);            
+        }
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+    }
+    
+    evhttp_clear_headers(&args);
+    if (key) {
+        free(key);
+    }
 }
 
 void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
@@ -242,13 +356,14 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         evbuffer_add_printf(evb, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", evb);
         json_object_put(jsobj);
-        free(key);
     } else {
-        evbuffer_add_printf(evb, "missing argument: key\n");
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_ARG_KEY", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
     }
     
     evhttp_clear_headers(&args);
+    if (key) {
+        free(key);
+    }
 }
 
 void info()
@@ -273,6 +388,9 @@ int main(int argc, char **argv)
     info();    
     simplehttp_init();
     simplehttp_set_cb("/put?*", put_cb, NULL);
+    simplehttp_set_cb("/del?*", del_cb, NULL);
+    simplehttp_set_cb("/incr?*", incr_cb, NULL);
+    simplehttp_set_cb("/decr?*", incr_cb, (void *)'d');
     simplehttp_set_cb("/search?*", search_cb, NULL);
     simplehttp_main();
     free_options();
