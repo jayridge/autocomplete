@@ -1,13 +1,13 @@
 #include <stdio.h>
 #include <simplehttp/simplehttp.h>
+#include <unicode/utypes.h>
+#include <unicode/ustring.h>
 #include "uthash.h"
-#include "utlist.h"
 #include "json/json.h"
 
 #define NAME        "autocomplete"
 #define VERSION     "0.1"
 #define DEBUG       1
-
 
 typedef struct el {
     char *key;
@@ -41,7 +41,7 @@ struct namespace *get_namespace(char *namespace)
 }
 
 int key_sort(el *a, el *b) {
-    return strcmp(a->key, b->key);
+    return strcasecmp(a->key, b->key);
 }
 
 int time_count_sort(el *a, el *b) {
@@ -67,10 +67,61 @@ void print_namespace(struct namespace *ns)
     }
 }
 
+/*
+ * tolower a utf8 str using the correct icu conversion with opt locale.
+ */
+char *utf8_tolower(char *s, char *locale)
+{
+    UChar *buf = NULL;
+    char *buf2 = NULL;
+    UErrorCode err = U_ZERO_ERROR;
+    int32_t len, len2;
+    
+    // utf8 to uchar
+    u_strFromUTF8(NULL, 0, &len, s, -1, &err);
+    buf = malloc(sizeof(UChar) * len+1);
+    err = U_ZERO_ERROR;
+    u_strFromUTF8(buf, len+1, &len, s, -1, &err);
+    if (U_FAILURE(err)) {
+        fprintf(stderr, "u_strFromUTF8 failed %s: %s\n", s, u_errorName(err));
+        free(buf);
+        return NULL;
+    }
+    
+    // uchar tolower
+    err = U_ZERO_ERROR;
+    u_strToLower(NULL, 0, (UChar *)buf, -1, locale, &err);
+    if (len2 > len) {
+        buf = realloc(buf, len2+1);
+    }
+    err = U_ZERO_ERROR;
+    u_strToLower(buf, len2+1, (UChar *)buf, -1, locale, &err);
+    if (U_FAILURE(err)) {
+        fprintf(stderr, "u_strToLower failed %s: %s\n", s, u_errorName(err));
+        free(buf);
+        return NULL;
+    }
+    
+    // lowered uchar to utf8
+    err = U_ZERO_ERROR;
+    u_strToUTF8(NULL, 0, &len, buf, -1, &err);
+    buf2 = malloc(sizeof(char) * len+1);
+    err = U_ZERO_ERROR;
+    u_strToUTF8(buf2, len+1, &len, (UChar *)buf, -1, &err);
+    if (U_FAILURE(err)) {
+        fprintf(stderr, "u_strToUTF8 failed %s: %s\n", s, u_errorName(err));
+        free(buf);
+        free(buf2);
+        return NULL;
+    }
+    free(buf);
+    return buf2;
+}
+
 void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 {
     struct evkeyvalq args;
-    char *namespace, *key, *data, *ts;
+    char *namespace, *key, *data, *ts, *locale;
     struct namespace *ns;
     struct el *e;
     time_t when = time(NULL);
@@ -82,6 +133,11 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
     ts = (char *)evhttp_find_header(&args, "ts");
     if (ts) {
         when = (time_t)strtol(ts, NULL, 10);
+    }
+    locale = (char *)evhttp_find_header(&args, "locale");
+    if (!locale) {
+        // "" for root locale, NULL for default
+        locale = "";
     }
     
     if (DEBUG) {
@@ -107,7 +163,7 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         if (!e) {
             e = malloc(sizeof(*e));
             memset(e, 0, sizeof(*e));
-            e->key = strdup(key);
+            e->key = utf8_tolower(key, locale);
             HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
             HASH_SORT(ns->elems, key_sort);
         }
@@ -135,15 +191,28 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 {
     struct evkeyvalq args;
-    char *namespace, *key;
+    char *namespace, *slimit, *locale, *qkey, *key = NULL;
     struct json_object *jsobj, *jsel, *jsresults;
     struct el *e, *results = NULL;
     struct namespace *ns;
+    int i, limit = 10;
     
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
-    key = (char *)evhttp_find_header(&args, "key");
-    
+    locale = (char *)evhttp_find_header(&args, "locale");
+    if (!locale) {
+        // "" for root locale, NULL for default
+        locale = "";
+    }
+    qkey = (char *)evhttp_find_header(&args, "key");
+    if (qkey) {
+        key = utf8_tolower(qkey, locale);
+    }
+    slimit = (char *)evhttp_find_header(&args, "limit");
+    if (slimit) {
+        limit = atoi(slimit);
+    }
+
     if (DEBUG) {
         fprintf(stderr, "/search_cb %s %s\n", namespace, key);
     }
@@ -158,7 +227,7 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
 #define key_match(x) (strncmp(((struct el*)x)->key,key,strlen(key)) == 0)
             HASH_SELECT(rh, results, hh, ns->elems, key_match);
             HASH_SRT(rh, results, time_count_sort);
-            for (e=results; e != NULL; e=e->rh.next) {
+            for (e=results, i=0; e != NULL && i < limit; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
                 json_object_object_add(jsel, "key", json_object_new_string(e->key));
                 json_object_object_add(jsel, "when", json_object_new_int(e->when));
@@ -173,6 +242,7 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         evbuffer_add_printf(evb, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", evb);
         json_object_put(jsobj);
+        free(key);
     } else {
         evbuffer_add_printf(evb, "missing argument: key\n");
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_ARG_KEY", evb);

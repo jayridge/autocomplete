@@ -5,7 +5,7 @@ LIBSIMPLEHTTP_INC ?= $(LIBSIMPLEHTTP)/..
 LIBSIMPLEHTTP_LIB ?= $(LIBSIMPLEHTTP)
 
 CFLAGS = -I$(LIBSIMPLEHTTP_INC) -I$(LIBEVENT)/include -Wall -g -O0
-LIBS = -L$(LIBSIMPLEHTTP_LIB) -L$(LIBEVENT)/lib -levent -lsimplehttp -lm -ljson
+LIBS = -L$(LIBSIMPLEHTTP_LIB) -L$(LIBEVENT)/lib -levent -lsimplehttp -lm -ljson -licui18n -licuuc -licudata
 
 autocomplete: autocomplete.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
