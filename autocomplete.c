@@ -400,7 +400,7 @@ int main(int argc, char **argv)
             port = atoi(optarg);
             break;
         case '?':
-            fprintf (stderr, "Unknown option '-%c'.\n", optopt);
+            fprintf (stderr, "Unknown option: '-%c'\n", optopt);
             return 1;
         }
     }
@@ -414,7 +414,7 @@ int main(int argc, char **argv)
     httpd = evhttp_start(address, port);
 
     if (httpd == NULL) {
-        fprintf(stdout, "Could not listen on: %s:%d", address, port);
+        fprintf(stdout, "Could not listen on: %s:%d\n", address, port);
         return 1;
     }
 
