@@ -13,10 +13,12 @@
 #include "uthash.h"
 #include "utstring.h"
 #include "json/json.h"
+#include <event.h>
+#include <evhttp.h>
 
-#define NAME        "autocomplete"
-#define VERSION     "0.1"
-#define DEBUG       1
+#define NAME "autocomplete"
+#define VERSION "0.1"
+#define DEBUG 1
 
 #define safe_free(s)    \
 if (s) {                \
@@ -46,17 +48,19 @@ struct namespace {
     UT_hash_handle hh;
 };
 
+struct evhttp *httpd;
 struct namespace *spaces = NULL;
 int max_elems = 1000;
 char *default_locale = ULOC_US;
-char *db_dir = NULL;
+char *db_dir = "/tmp";
 struct event backup_timer;
 struct timeval backup_tv = {10, 0};
 
-void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx);
-void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx);
-
-
+void put_cb(struct evhttp_request *req, void *arg);
+void search_cb(struct evhttp_request *req, void *arg);
+void incr_cb(struct evhttp_request *req, void *arg);
+void decr_cb(struct evhttp_request *req, void *arg);
+void delete_cb(struct evhttp_request *req, void *arg);
 
 struct namespace *get_namespace(char *namespace)
 {
@@ -337,12 +341,13 @@ void load()
     utstring_free(ustr);
 }
 
-void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+void put_cb(struct evhttp_request *req, void *arg)
 {
+    struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     char *namespace, *key, *data, *ts, *locale;
     time_t when = time(NULL);
-    
+
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key = (char *)evhttp_find_header(&args, "key");
@@ -352,28 +357,29 @@ void put_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
         when = (time_t)strtol(ts, NULL, 10);
     }
     locale = (char *)evhttp_find_header(&args, "locale");
-    
     if (DEBUG) {
         fprintf(stderr, "/put_cb %s %s\n", namespace, key);
     }
-    
+
     if (namespace && key) {
         put_el(locale, namespace, key, data, when, 1);
-        evhttp_send_reply(req, HTTP_OK, "OK", evb);
+        evhttp_send_reply(req, HTTP_OK, "OK", buf);
     } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
-    
+
     evhttp_clear_headers(&args);
+    evbuffer_free(buf);
 }
 
-void del_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+void del_cb(struct evhttp_request *req, void *arg)
 {
+    struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     char *namespace, *locale, *qkey, *key = NULL;
     struct el *e;
     struct namespace *ns;
-    
+
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     locale = (char *)evhttp_find_header(&args, "locale");
@@ -381,11 +387,11 @@ void del_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
     if (qkey) {
         key = utf8_tolower(qkey, locale);
     }
-    
+
     if (DEBUG) {
         fprintf(stderr, "/search_cb %s %s\n", namespace, key);
     }
-    
+
     if (namespace && key) {
         ns = get_namespace(namespace);
         if (ns) {
@@ -393,25 +399,27 @@ void del_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
             if (e) {
                 HASH_DEL(ns->elems, e);
                 free_el(e);
-                evhttp_send_reply(req, HTTP_OK, "OK", evb);
+                evhttp_send_reply(req, HTTP_OK, "OK", buf);
             } else {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", evb);
+                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", buf);
             }
         } else {
-            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", evb);            
+            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);
         }
     } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
-    
+
     evhttp_clear_headers(&args);
     if (key) {
         free(key);
     }
+    evbuffer_free(buf);
 }
 
-void incr_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+void incr_cb(struct evhttp_request *req, void *arg)
 {
+    struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     char *namespace, *locale, *svalue, *qkey, *key = NULL;
     struct el *e;
@@ -432,7 +440,7 @@ void incr_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
     svalue = (char *)evhttp_find_header(&args, "value");
     if (svalue) {
         value = atoi(svalue);
-        if (ctx) {  // this is a decr
+        if (arg) {  // this is a decr
             value = -value;
         }
     }
@@ -451,25 +459,27 @@ void incr_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
                     HASH_DEL(ns->elems, e);
                     free_el(e);
                 }
-                evhttp_send_reply(req, HTTP_OK, "OK", evb);
+                evhttp_send_reply(req, HTTP_OK, "OK", buf);
             } else {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", evb);
+                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", buf);
             }
         } else {
-            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", evb);            
+            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);            
         }
     } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
     
     evhttp_clear_headers(&args);
     if (key) {
         free(key);
     }
+    evbuffer_free(buf);
 }
 
-void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
+void search_cb(struct evhttp_request *req, void *arg)
 {
+    struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     char *namespace, *slimit, *locale, *qkey, *key = NULL;
     struct json_object *jsobj, *jsel, *jsresults;
@@ -523,58 +533,87 @@ void search_cb(struct evhttp_request *req, struct evbuffer *evb, void *ctx)
             HASH_CLEAR(rh, results);
         }
         json_object_object_add(jsobj, "results", jsresults);
-        evbuffer_add_printf(evb, "%s\n", (char *)json_object_to_json_string(jsobj));
-        evhttp_send_reply(req, HTTP_OK, "OK", evb);
+        evbuffer_add_printf(buf, "%s\n", (char *)json_object_to_json_string(jsobj));
+        evhttp_send_reply(req, HTTP_OK, "OK", buf);
         json_object_put(jsobj);
     } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", evb);
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
-    
+
     evhttp_clear_headers(&args);
     if (key) {
         free(key);
     }
+    evbuffer_free(buf);
 }
 
-void info()
+void termination_handler(int signum)
 {
-    fprintf(stdout, "%s: autocomplete server.\n", NAME);
-    fprintf(stdout, "Version: %s, https://github.com/jayridge/autocomplete\n", VERSION);
-}
-
-int version_cb(int value)
-{
-    fprintf(stdout, "Version: %s\n", VERSION);
-    return 0;
+    fprintf(stdout, "Shutting down...\n");
+    event_loopbreak();
 }
 
 int main(int argc, char **argv)
 {
+    int opt;
+    int port = 8080;
+    char *address = "0.0.0.0";
+
     UErrorCode err = U_ZERO_ERROR;
 
+    /*
     define_simplehttp_options();
     option_define_str("dir", OPT_OPTIONAL, NULL, &db_dir, NULL, "backup directory");
     option_define_str("locale", OPT_OPTIONAL, ULOC_US , &default_locale, NULL, "default locale \"en_US\"");
     if (!option_parse_command_line(argc, argv)) {
         return 1;
     }
+     */
+    
     uloc_setDefault(default_locale, &err);
     if (U_FAILURE(err)) {
         fprintf(stderr, "uloc_setDefault failed %s: %s\n", default_locale, u_errorName(err));
         exit(1);
     }
     
-    info();    
-    simplehttp_init();
-    load();
-    backup(0, 0, NULL);
-    simplehttp_set_cb("/put?*", put_cb, NULL);
-    simplehttp_set_cb("/del?*", del_cb, NULL);
-    simplehttp_set_cb("/incr?*", incr_cb, NULL);
-    simplehttp_set_cb("/decr?*", incr_cb, (void *)'d');
-    simplehttp_set_cb("/search?*", search_cb, NULL);
-    simplehttp_main();
-    free_options();
     
+    while((opt = getopt(argc, argv, "a:p:")) != -1) {
+        switch(opt) {
+            case 'a':
+                address = optarg;
+                break;
+            case 'p':
+                port = atoi(optarg);
+                break;
+            case '?':
+                fprintf (stderr, "Unknown option: '-%c'\n", optopt);
+                return 1;
+        }
+    }
+    
+    signal(SIGINT, termination_handler);
+    signal(SIGQUIT, termination_handler);
+    signal(SIGTERM, termination_handler);
+    signal(SIGPIPE, SIG_IGN);
+    
+    event_init();
+    httpd = evhttp_start(address, port);
+    
+    if (httpd == NULL) {
+        fprintf(stdout, "Could not listen on: %s:%d\n", address, port);
+        return 1;
+    }
+    
+    evhttp_set_cb(httpd, "/put", put_cb, NULL);
+    evhttp_set_cb(httpd, "/put", put_cb, NULL);
+    evhttp_set_cb(httpd, "/del", del_cb, NULL);
+    evhttp_set_cb(httpd, "/incr", incr_cb, NULL);
+    evhttp_set_cb(httpd, "/decr", incr_cb, (void *)'d');
+    evhttp_set_cb(httpd, "/search", search_cb, NULL);
+    
+    fprintf(stdout, "%s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
+    
+    event_dispatch();
+    evhttp_free(httpd);
     return 0;
 }
