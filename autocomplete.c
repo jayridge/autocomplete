@@ -386,22 +386,21 @@ void termination_handler(int signum)
 
 int main(int argc, char **argv)
 {
-    int c;
+    int opt;
     int port = 8080;
     char *address = "0.0.0.0";
-    extern char *optarg;
 
-    while((c = getopt(argc, argv, "ap:")) != -1) {
-        switch(c) {
-            case 'a':
-                address = optarg;
-                break;
-            case 'p':
-                port = atoi(optarg);
-                break;
-            case '?':
-                fprintf (stderr, "Unknown option '-%c'.\n", optopt);
-                return 1;
+    while((opt = getopt(argc, argv, "ap:")) != -1) {
+        switch(opt) {
+        case 'a':
+            address = optarg;
+            break;
+        case 'p':
+            port = atoi(optarg);
+            break;
+        case '?':
+            fprintf (stderr, "Unknown option '-%c'.\n", optopt);
+            return 1;
         }
     }
 
