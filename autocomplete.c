@@ -558,32 +558,21 @@ int main(int argc, char **argv)
     int opt;
     int port = 8080;
     char *address = "0.0.0.0";
-
     UErrorCode err = U_ZERO_ERROR;
-
-    /*
-    define_simplehttp_options();
-    option_define_str("dir", OPT_OPTIONAL, NULL, &db_dir, NULL, "backup directory");
-    option_define_str("locale", OPT_OPTIONAL, ULOC_US , &default_locale, NULL, "default locale \"en_US\"");
-    if (!option_parse_command_line(argc, argv)) {
-        return 1;
-    }
-     */
-    
-    uloc_setDefault(default_locale, &err);
-    if (U_FAILURE(err)) {
-        fprintf(stderr, "uloc_setDefault failed %s: %s\n", default_locale, u_errorName(err));
-        exit(1);
-    }
-    
-    
-    while((opt = getopt(argc, argv, "a:p:")) != -1) {
+        
+    while((opt = getopt(argc, argv, "a:d:p:l:")) != -1) {
         switch(opt) {
             case 'a':
                 address = optarg;
                 break;
+            case 'd':
+                db_dir = optarg;
+                break;
             case 'p':
                 port = atoi(optarg);
+                break;
+            case 'l':
+                default_locale = optarg;
                 break;
             case '?':
                 fprintf (stderr, "Unknown option: '-%c'\n", optopt);
@@ -596,7 +585,15 @@ int main(int argc, char **argv)
     signal(SIGTERM, termination_handler);
     signal(SIGPIPE, SIG_IGN);
     
+    uloc_setDefault(default_locale, &err);
+    if (U_FAILURE(err)) {
+        fprintf(stderr, "uloc_setDefault failed %s: %s\n", default_locale, u_errorName(err));
+        exit(1);
+    }
+
     event_init();
+    load();
+    backup(0,0,NULL);
     httpd = evhttp_start(address, port);
     
     if (httpd == NULL) {
