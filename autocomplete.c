@@ -381,6 +381,7 @@ void search_cb(struct evhttp_request *req, void *arg)
 
 void termination_handler(int signum)
 {
+    fprintf(stdout, "Shutting down...\n");
     event_loopbreak();
 }
 
