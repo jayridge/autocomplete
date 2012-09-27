@@ -390,7 +390,7 @@ int main(int argc, char **argv)
     int port = 8080;
     char *address = "0.0.0.0";
 
-    while((opt = getopt(argc, argv, "ap:")) != -1) {
+    while((opt = getopt(argc, argv, "a:p:")) != -1) {
         switch(opt) {
         case 'a':
             address = optarg;
