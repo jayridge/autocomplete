@@ -409,10 +409,13 @@ int main(int argc, char **argv)
     signal(SIGTERM, termination_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    fprintf(stdout, "%s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
-
     event_init();
     httpd = evhttp_start(address, port);
+
+    if (httpd == NULL) {
+        fprintf(stdout, "Could not listen on: %s:%d", address, port);
+        return 1;
+    }
 
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
@@ -420,6 +423,8 @@ int main(int argc, char **argv)
     evhttp_set_cb(httpd, "/incr", incr_cb, NULL);
     evhttp_set_cb(httpd, "/decr", incr_cb, (void *)'d');
     evhttp_set_cb(httpd, "/search", search_cb, NULL);
+
+    fprintf(stdout, "%s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
 
     event_dispatch();
     evhttp_free(httpd);
