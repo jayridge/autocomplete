@@ -3,13 +3,14 @@
 #include <stdio.h>
 #include <unicode/utypes.h>
 #include <unicode/ustring.h>
+#include <unistd.h>
 
 #include "json/json.h"
 #include "uthash.h"
 
-#define NAME        "autocomplete"
-#define VERSION     "0.1"
-#define DEBUG       1
+#define NAME "autocomplete"
+#define VERSION "0.1"
+#define DEBUG 1
 
 typedef struct el {
     char *key;
@@ -378,24 +379,41 @@ void search_cb(struct evhttp_request *req, void *arg)
     evbuffer_free(buf);
 }
 
-void info()
+void termination_handler(int signum)
 {
-    fprintf(stdout, "%s: autocomplete server.\n", NAME);
-    fprintf(stdout, "Version: %s, https://github.com/jayridge/autocomplete\n", VERSION);
-}
-
-int version_cb(int value)
-{
-    fprintf(stdout, "Version: %s\n", VERSION);
-    return 0;
+    event_loopbreak();
 }
 
 int main(int argc, char **argv)
 {
-    info();
+    int c;
+    int port = 8080;
+    char *address = "0.0.0.0";
+    extern char *optarg;
+
+    while((c = getopt(argc, argv, "ap:")) != -1) {
+        switch(c) {
+            case 'a':
+                address = optarg;
+                break;
+            case 'p':
+                port = atoi(optarg);
+                break;
+            case '?':
+                fprintf (stderr, "Unknown option '-%c'.\n", optopt);
+                return 1;
+        }
+    }
+
+    signal(SIGINT, termination_handler);
+    signal(SIGQUIT, termination_handler);
+    signal(SIGTERM, termination_handler);
     signal(SIGPIPE, SIG_IGN);
+
+    fprintf(stdout, "%s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
+
     event_init();
-    httpd = evhttp_start("0.0.0.0", 8080);
+    httpd = evhttp_start(address, port);
 
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
