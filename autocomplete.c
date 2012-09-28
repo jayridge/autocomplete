@@ -173,10 +173,10 @@ char *utf8_tolower(char *s, char *locale)
     return buf2;
 }
 
-void put_el(char *locale, char *namespace, char *key, char *data, time_t when, int dirty)
+struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t when, int mark_dirty)
 {
     struct namespace *ns;
-    struct el *e, *etmp;
+    struct el *e;
     
     /*
      *  struct namespace
@@ -188,34 +188,37 @@ void put_el(char *locale, char *namespace, char *key, char *data, time_t when, i
         ns->name = strdup(namespace);
         HASH_ADD_KEYPTR(hh, spaces, ns->name, strlen(ns->name), ns);
     }
-    if (dirty) {
+    if (mark_dirty) {
         ns->dirty = 1;
     }
     /*
      *  struct el
      */
+    if (HASH_COUNT(ns->elems) > max_elems) {
+        /*
+         *  This is tricky. UT_hash keeps two sort orders.
+         *  This deletes from the head ( oldest insert ).
+         */
+        e = ns->elems;
+        HASH_DEL(ns->elems, e);
+        free_el(e);
+    }
     HASH_FIND_STR(ns->elems, key, e);
-    if (!e) {
+    if (e) {
+        HASH_DEL(ns->elems, e);
+    } else {
         e = malloc(sizeof(*e));
         memset(e, 0, sizeof(*e));
         e->key = utf8_tolower(key, locale);
-        HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
-        if (HASH_COUNT(ns->elems) > max_elems) {
-            /*
-             *  This is tricky. UT_hash keeps two sort orders.
-             *  This deletes from the head ( oldest insert ).
-             */
-            etmp = ns->elems;
-            HASH_DEL(ns->elems, etmp);
-            free_el(etmp);
-        }
     }
     if (e->data) {
         free(e->data);
     }
     e->data = (data ? strdup(data) : NULL);
     e->when = when;
-    e->count += 1;
+    HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
+
+    return e;
 }
 
 char *gen_path(UT_string *buf, char *dir, char *file, char *ext)
@@ -230,8 +233,7 @@ void backup(int timer_fd, short event, void *arg)
     struct namespace *ns;
     struct el *e;
     UT_string *path1, *path2;
-    struct iovec iov[7];
-    int fd, ok, i, n;
+    int fd, ok, n;
     struct hdr {
         uint32_t klen;
         uint32_t dlen;
@@ -243,14 +245,12 @@ void backup(int timer_fd, short event, void *arg)
     evtimer_set(&backup_timer, backup, NULL);
     evtimer_add(&backup_timer, &backup_tv);
 
-    fprintf(stderr, "backup\n");
     if (!db_dir) {
         return;
     }
     utstring_new(path1);
     utstring_new(path2);
     for (ns=spaces; ns != NULL; ns=ns->hh.next) {
-        fprintf(stderr, "namespace %s dirty %d\n", ns->name, ns->dirty);
         if (!ns->dirty) {
             continue;
         }
@@ -260,6 +260,8 @@ void backup(int timer_fd, short event, void *arg)
             fprintf(stderr, "open failed %s: %s\n", utstring_body(path1), strerror(errno));
             continue;
         }
+        fprintf(stderr, "backing up %s\n", ns->name);
+
         for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
             /*
              * key sz, data sz, time, count, key, data
@@ -288,7 +290,6 @@ void backup(int timer_fd, short event, void *arg)
 
 void load()
 {
-    struct namespace *ns;
     struct el *e;
     UT_string *ustr;
     glob_t g;
@@ -301,7 +302,6 @@ void load()
         uint32_t count;
     } hdr;
     
-    fprintf(stderr, "load\n");
     if (!db_dir) {
         return;
     }
@@ -318,9 +318,7 @@ void load()
         namespace = strrchr(g.gl_pathv[i], '/')+1;
         s = strrchr(namespace, '.');
         *s = '\0';
-        fprintf(stderr, "loading %s\n", namespace);
         
-        memset(&hdr, 0, sizeof(hdr));
         n = read(fd, &hdr, sizeof(hdr));
         while (n == sizeof(hdr)) {
             klen = ntohl(hdr.klen);
@@ -329,8 +327,9 @@ void load()
             data = realloc(data, dlen);
             n = read(fd, key, klen);
             n = read(fd, data, dlen);
-            fprintf(stderr, "key %s data %s\n", key, data);
-            put_el(NULL, namespace, key, data, ntohl(hdr.when), 0);
+            fprintf(stderr, "loading %s::%s %s\n", namespace, key, data);
+            e = put_el(NULL, namespace, key, data, ntohl(hdr.when), 0);
+            e->count = ntohl(hdr.count);
             n = read(fd, &hdr, sizeof(hdr));
         }
         close(fd);
@@ -345,6 +344,7 @@ void put_cb(struct evhttp_request *req, void *arg)
 {
     struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
+    struct el *e;
     char *namespace, *key, *data, *ts, *locale;
     time_t when = time(NULL);
 
@@ -362,7 +362,8 @@ void put_cb(struct evhttp_request *req, void *arg)
     }
 
     if (namespace && key) {
-        put_el(locale, namespace, key, data, when, 1);
+        e = put_el(locale, namespace, key, data, when, 1);
+        e->count += 1;
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
@@ -410,10 +411,8 @@ void del_cb(struct evhttp_request *req, void *arg)
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
 
+    safe_free(key);
     evhttp_clear_headers(&args);
-    if (key) {
-        free(key);
-    }
     evbuffer_free(buf);
 }
 
@@ -429,10 +428,6 @@ void incr_cb(struct evhttp_request *req, void *arg)
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     locale = (char *)evhttp_find_header(&args, "locale");
-    if (!locale) {
-        // "" for root locale, NULL for default
-        locale = "";
-    }
     qkey = (char *)evhttp_find_header(&args, "key");
     if (qkey) {
         key = utf8_tolower(qkey, locale);
@@ -470,10 +465,8 @@ void incr_cb(struct evhttp_request *req, void *arg)
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
     
+    safe_free(key);
     evhttp_clear_headers(&args);
-    if (key) {
-        free(key);
-    }
     evbuffer_free(buf);
 }
 
@@ -485,15 +478,11 @@ void search_cb(struct evhttp_request *req, void *arg)
     struct json_object *jsobj, *jsel, *jsresults;
     struct el *e, *results = NULL;
     struct namespace *ns;
-    int i, limit = 10;
+    int i, limit = 100;
     
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     locale = (char *)evhttp_find_header(&args, "locale");
-    if (!locale) {
-        // "" for root locale, NULL for default
-        locale = "";
-    }
     qkey = (char *)evhttp_find_header(&args, "key");
     if (qkey) {
         key = utf8_tolower(qkey, locale);
@@ -540,10 +529,8 @@ void search_cb(struct evhttp_request *req, void *arg)
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
 
+    safe_free(key);
     evhttp_clear_headers(&args);
-    if (key) {
-        free(key);
-    }
     evbuffer_free(buf);
 }
 
@@ -595,7 +582,6 @@ int main(int argc, char **argv)
     load();
     backup(0,0,NULL);
     httpd = evhttp_start(address, port);
-    
     if (httpd == NULL) {
         fprintf(stdout, "Could not listen on: %s:%d\n", address, port);
         return 1;
