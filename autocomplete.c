@@ -238,8 +238,10 @@ void backup(int timer_fd, short event, void *arg)
         uint32_t when;
         uint32_t count;
     } hdr;
-    
-    evtimer_del(&backup_timer);
+
+    if (evtimer_initialized(&backup_timer)) {
+        evtimer_del(&backup_timer);
+    }
     evtimer_set(&backup_timer, backup, NULL);
     evtimer_add(&backup_timer, &backup_tv);
 
