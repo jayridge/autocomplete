@@ -14,6 +14,8 @@
 #include "json/json.h"
 #include <event.h>
 #include <evhttp.h>
+#include <signal.h>
+#include <time.h>
 
 #define NAME "autocomplete"
 #define VERSION "0.1"
