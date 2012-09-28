@@ -19,6 +19,9 @@
 #define NAME "autocomplete"
 #define VERSION "0.1"
 #define DEBUG 1
+#define DEFAULT_PORT 8080
+
+#define key_match(x) (strncmp(((struct el*)x)->key,key,strlen(key)) == 0)
 
 #define safe_free(s)    \
 if (s) {                \
@@ -52,7 +55,7 @@ struct evhttp *httpd;
 struct namespace *spaces = NULL;
 int max_elems = 1000;
 char *default_locale = ULOC_US;
-char *db_dir = "/tmp";
+char *db_dir = NULL;
 struct event backup_timer;
 struct timeval backup_tv = {10, 0};
 
@@ -113,37 +116,23 @@ void free_el(struct el *e)
     }
 }
 
-void print_namespace(struct namespace *ns)
-{
-    struct el *e;
-    for (e=ns->elems; e != NULL; e=e->hh.next) {
-        fprintf(stderr, "%s %ld %s\n", e->key, e->when, (e->data ? e->data : "none"));
-    }
-}
-
-
-/*
- * tolower a utf8 str using the correct icu conversion with opt locale.
- */
 char *utf8_tolower(char *s, char *locale)
 {
     UChar *buf = NULL;
     char *buf2 = NULL;
     UErrorCode err = U_ZERO_ERROR;
     int32_t len, len2;
-    
-    // utf8 to uchar
+
     u_strFromUTF8(NULL, 0, &len, s, -1, &err);
     buf = malloc(sizeof(UChar) * len+1);
     err = U_ZERO_ERROR;
     u_strFromUTF8(buf, len+1, &len, s, -1, &err);
     if (U_FAILURE(err)) {
-        fprintf(stderr, "u_strFromUTF8 failed %s: %s\n", s, u_errorName(err));
+        fprintf(stderr, "u_strFromUTF8 failed: %s: %s\n", s, u_errorName(err));
         free(buf);
         return NULL;
     }
-    
-    // uchar tolower
+
     err = U_ZERO_ERROR;
     len2 = u_strToLower(NULL, 0, (UChar *)buf, -1, locale, &err);
     if (len2 > len) {
@@ -152,19 +141,18 @@ char *utf8_tolower(char *s, char *locale)
     err = U_ZERO_ERROR;
     u_strToLower(buf, len2+1, (UChar *)buf, -1, locale, &err);
     if (U_FAILURE(err)) {
-        fprintf(stderr, "u_strToLower failed %s: %s\n", s, u_errorName(err));
+        fprintf(stderr, "u_strToLower failed: %s: %s\n", s, u_errorName(err));
         free(buf);
         return NULL;
     }
-    
-    // lowered uchar to utf8
+
     err = U_ZERO_ERROR;
     u_strToUTF8(NULL, 0, &len, buf, -1, &err);
     buf2 = malloc(sizeof(char) * len+1);
     err = U_ZERO_ERROR;
     u_strToUTF8(buf2, len+1, &len, (UChar *)buf, -1, &err);
     if (U_FAILURE(err)) {
-        fprintf(stderr, "u_strToUTF8 failed %s: %s\n", s, u_errorName(err));
+        fprintf(stderr, "u_strToUTF8 failed: %s: %s\n", s, u_errorName(err));
         free(buf);
         free(buf2);
         return NULL;
@@ -177,10 +165,7 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t w
 {
     struct namespace *ns;
     struct el *e;
-    
-    /*
-     *  struct namespace
-     */
+
     ns = get_namespace(namespace);
     if (!ns) {
         ns = malloc(sizeof(*ns));
@@ -191,9 +176,6 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t w
     if (mark_dirty) {
         ns->dirty = 1;
     }
-    /*
-     *  struct el
-     */
     if (HASH_COUNT(ns->elems) > max_elems) {
         /*
          *  This is tricky. UT_hash keeps two sort orders.
@@ -256,10 +238,10 @@ void backup(int timer_fd, short event, void *arg)
         ns->dirty = 0;
         fd = open(gen_path(path1, db_dir, ns->name, ".tmp"), O_CREAT|O_TRUNC|O_RDWR, 0660);
         if (fd == -1) {
-            fprintf(stderr, "open failed %s: %s\n", utstring_body(path1), strerror(errno));
+            fprintf(stderr, "Open failed: %s: %s\n", utstring_body(path1), strerror(errno));
             continue;
         }
-        fprintf(stderr, "backing up %s\n", ns->name);
+        fprintf(stderr, "Backing up: %s\n", ns->name);
 
         for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
             /*
@@ -271,7 +253,7 @@ void backup(int timer_fd, short event, void *arg)
             hdr.count = htonl(e->count);
             n = write(fd, &hdr, sizeof(hdr));
             if (n == -1) {
-                fprintf(stderr, "writev failed %s: %s\n", utstring_body(path1), strerror(errno));
+                fprintf(stderr, "Write failed: %s: %s\n", utstring_body(path1), strerror(errno));
                 ok = 0;
                 break;
             }
@@ -300,25 +282,26 @@ void load()
         uint32_t when;
         uint32_t count;
     } hdr;
-    
+
     if (!db_dir) {
         return;
     }
-    
+
     utstring_new(ustr);
     utstring_printf(ustr, "%s/*.bak", db_dir);
     glob(utstring_body(ustr), 0, NULL, &g);
     for (i=0; i < GLOBC(g); i++) {
         fd = open(g.gl_pathv[i], O_RDONLY);
         if (fd == -1) {
-            fprintf(stderr, "open failed %s: %s\n", g.gl_pathv[i], strerror(errno));
+            fprintf(stderr, "Open failed: %s: %s\n", g.gl_pathv[i], strerror(errno));
             continue;
         }
         namespace = strrchr(g.gl_pathv[i], '/')+1;
         s = strrchr(namespace, '.');
         *s = '\0';
-        
+
         n = read(fd, &hdr, sizeof(hdr));
+        fprintf(stderr, "Loading: %s\n", namespace);
         while (n == sizeof(hdr)) {
             klen = ntohl(hdr.klen);
             dlen = ntohl(hdr.dlen);
@@ -326,7 +309,6 @@ void load()
             data = realloc(data, dlen);
             n = read(fd, key, klen);
             n = read(fd, data, dlen);
-            fprintf(stderr, "loading %s::%s %s\n", namespace, key, data);
             e = put_el(NULL, namespace, key, data, ntohl(hdr.when), 0);
             e->count = ntohl(hdr.count);
             n = read(fd, &hdr, sizeof(hdr));
@@ -423,7 +405,7 @@ void incr_cb(struct evhttp_request *req, void *arg)
     struct el *e;
     int value = 0;
     struct namespace *ns;
-    
+
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     locale = (char *)evhttp_find_header(&args, "locale");
@@ -438,11 +420,11 @@ void incr_cb(struct evhttp_request *req, void *arg)
             value = -value;
         }
     }
-    
+
     if (DEBUG) {
         fprintf(stderr, "/incr_cb %s %s\n", namespace, key);
     }
-    
+
     if (namespace && key && value) {
         ns = get_namespace(namespace);
         if (ns) {
@@ -458,12 +440,12 @@ void incr_cb(struct evhttp_request *req, void *arg)
                 evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", buf);
             }
         } else {
-            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);            
+            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);
         }
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
-    
+
     safe_free(key);
     evhttp_clear_headers(&args);
     evbuffer_free(buf);
@@ -478,7 +460,7 @@ void search_cb(struct evhttp_request *req, void *arg)
     struct el *e, *results = NULL;
     struct namespace *ns;
     int i, limit = 100;
-    
+
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     locale = (char *)evhttp_find_header(&args, "locale");
@@ -494,11 +476,9 @@ void search_cb(struct evhttp_request *req, void *arg)
     if (DEBUG) {
         fprintf(stderr, "/search_cb %s %s\n", namespace, key);
     }
-    
+
     if (namespace && key) {
         jsobj = json_object_new_object();
-        json_object_object_add(jsobj, "namespace", json_object_new_string(namespace));
-        json_object_object_add(jsobj, "key", json_object_new_string(key));
         jsresults = json_object_new_array();
         ns = get_namespace(namespace);
         if (ns) {
@@ -506,21 +486,18 @@ void search_cb(struct evhttp_request *req, void *arg)
              *  UT_hash does not offer a reentrant select func, so we will
              *  define it such that we have access to the stack.
              */
-#define key_match(x) (strncmp(((struct el*)x)->key,key,strlen(key)) == 0)
             HASH_SELECT(rh, results, hh, ns->elems, key_match);
             HASH_SRT(rh, results, time_count_sort);
             for (e=results, i=0; e != NULL && i < limit; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
-                json_object_object_add(jsel, "key", json_object_new_string(e->key));
-                json_object_object_add(jsel, "when", json_object_new_int(e->when));
-                json_object_object_add(jsel, "count", json_object_new_int(e->count));
-                json_object_object_add(jsel, "data", json_object_new_string(e->data));
+                json_object_object_add(jsel, "k", json_object_new_string(e->key));
+                json_object_object_add(jsel, "d", json_object_new_string(e->data));
                 json_object_array_add(jsresults, jsel);
                 fprintf(stderr, "elem key %s\n", e->key);
             }
             HASH_CLEAR(rh, results);
         }
-        json_object_object_add(jsobj, "results", jsresults);
+        json_object_object_add(jsobj, "r", jsresults);
         evbuffer_add_printf(buf, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
         json_object_put(jsobj);
@@ -542,10 +519,10 @@ void termination_handler(int signum)
 int main(int argc, char **argv)
 {
     int opt;
-    int port = 8080;
+    int port = DEFAULT_PORT;
     char *address = "0.0.0.0";
     UErrorCode err = U_ZERO_ERROR;
-        
+
     while((opt = getopt(argc, argv, "a:d:p:l:")) != -1) {
         switch(opt) {
             case 'a':
@@ -565,36 +542,36 @@ int main(int argc, char **argv)
                 return 1;
         }
     }
-    
+
     signal(SIGINT, termination_handler);
     signal(SIGQUIT, termination_handler);
     signal(SIGTERM, termination_handler);
     signal(SIGPIPE, SIG_IGN);
-    
+
     uloc_setDefault(default_locale, &err);
     if (U_FAILURE(err)) {
-        fprintf(stderr, "uloc_setDefault failed %s: %s\n", default_locale, u_errorName(err));
+        fprintf(stderr, "Could not set default location: %s: %s\n", default_locale, u_errorName(err));
         exit(1);
     }
 
     event_init();
     load();
     backup(0,0,NULL);
+
     httpd = evhttp_start(address, port);
     if (httpd == NULL) {
         fprintf(stdout, "Could not listen on: %s:%d\n", address, port);
         return 1;
     }
-    
-    evhttp_set_cb(httpd, "/put", put_cb, NULL);
+
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
     evhttp_set_cb(httpd, "/del", del_cb, NULL);
     evhttp_set_cb(httpd, "/incr", incr_cb, NULL);
     evhttp_set_cb(httpd, "/decr", incr_cb, (void *)'d');
     evhttp_set_cb(httpd, "/search", search_cb, NULL);
-    
-    fprintf(stdout, "%s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
-    
+
+    fprintf(stdout, "Starting %s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
+
     event_dispatch();
     evhttp_free(httpd);
     return 0;
