@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <sys/uio.h>
 #include <arpa/inet.h>
-#include <simplehttp/simplehttp.h>
 #include <unicode/uloc.h>
 #include <unicode/utypes.h>
 #include <unicode/ustring.h>
