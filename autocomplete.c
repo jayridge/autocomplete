@@ -64,7 +64,7 @@ void put_cb(struct evhttp_request *req, void *arg);
 void search_cb(struct evhttp_request *req, void *arg);
 void incr_cb(struct evhttp_request *req, void *arg);
 void decr_cb(struct evhttp_request *req, void *arg);
-void delete_cb(struct evhttp_request *req, void *arg);
+void del_cb(struct evhttp_request *req, void *arg);
 
 struct namespace *get_namespace(char *namespace)
 {
