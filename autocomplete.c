@@ -12,10 +12,10 @@
 #include "uthash.h"
 #include "utstring.h"
 #include "json/json.h"
-#include <event.h>
-#include <evhttp.h>
 #include <signal.h>
 #include <time.h>
+#include <event.h>
+#include <evhttp.h>
 
 #define NAME "autocomplete"
 #define VERSION "0.1"
@@ -166,6 +166,7 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t w
 {
     struct namespace *ns;
     struct el *e;
+    char *key_nrm = utf8_tolower(key, locale);
 
     ns = get_namespace(namespace);
     if (!ns) {
@@ -186,17 +187,18 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t w
         HASH_DEL(ns->elems, e);
         free_el(e);
     }
-    HASH_FIND_STR(ns->elems, key, e);
+    fprintf(stderr, "looking for %s\n", key);
+    HASH_FIND_STR(ns->elems, key_nrm, e);
     if (e) {
+        fprintf(stderr, "delete %s\n", e->key);
         HASH_DEL(ns->elems, e);
+        safe_free(key_nrm);
     } else {
         e = malloc(sizeof(*e));
         memset(e, 0, sizeof(*e));
-        e->key = utf8_tolower(key, locale);
+        e->key = key_nrm;
     }
-    if (e->data) {
-        free(e->data);
-    }
+    safe_free(e->data);
     e->data = (data ? strdup(data) : NULL);
     e->when = when;
     HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
