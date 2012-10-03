@@ -37,6 +37,8 @@ if (s) {                \
 
 typedef struct el {
     char *key;
+    char *id;
+    char *type;
     char *data;
     time_t when;
     int count;
@@ -162,7 +164,7 @@ char *utf8_tolower(char *s, char *locale)
     return buf2;
 }
 
-struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t when, int mark_dirty)
+struct el *put_el(char *locale, char *namespace, char *key, char *data, char *id, char *type, time_t when, int mark_dirty)
 {
     struct namespace *ns;
     struct el *e;
@@ -200,6 +202,10 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, time_t w
     }
     safe_free(e->data);
     e->data = (data ? strdup(data) : NULL);
+    safe_free(e->id);
+    e->id = (id ? strdup(id) : NULL);
+    safe_free(e->type);
+    e->type = (type ? strdup(type) : NULL);
     e->when = when;
     HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
 
@@ -222,6 +228,8 @@ void backup(int timer_fd, short event, void *arg)
     struct hdr {
         uint32_t klen;
         uint32_t dlen;
+        uint32_t ilen;
+        uint32_t tlen;
         uint32_t when;
         uint32_t count;
     } hdr;
@@ -248,10 +256,12 @@ void backup(int timer_fd, short event, void *arg)
 
         for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
             /*
-             * key sz, data sz, time, count, key, data
+             * key sz, data sz, time, count, key, data, id, type
              */
             hdr.klen = htonl(strlen(e->key)+1);
             hdr.dlen = htonl(strlen(e->data)+1);
+            hdr.ilen = htonl(strlen(e->id)+1);
+            hdr.tlen = htonl(strlen(e->type)+1);
             hdr.when = htonl(e->when);
             hdr.count = htonl(e->count);
             n = write(fd, &hdr, sizeof(hdr));
@@ -262,6 +272,8 @@ void backup(int timer_fd, short event, void *arg)
             }
             write(fd, e->key, strlen(e->key)+1);
             write(fd, e->data, strlen(e->data)+1);
+            write(fd, e->id, strlen(e->id)+1);
+            write(fd, e->type, strlen(e->type)+1);
         }
         if (ok) {
             rename(utstring_body(path1), gen_path(path2, db_dir, ns->name, ".bak"));
@@ -277,11 +289,13 @@ void load()
     struct el *e;
     UT_string *ustr;
     glob_t g;
-    int i, fd, n, klen, dlen;
-    char *s, *namespace, *key = NULL, *data = NULL;
+    int i, fd, n, klen, dlen, ilen, tlen;
+    char *s, *namespace, *key = NULL, *id = NULL, *type = NULL, *data = NULL;
     struct hdr {
         uint32_t klen;
         uint32_t dlen;
+        uint32_t ilen;
+        uint32_t tlen;
         uint32_t when;
         uint32_t count;
     } hdr;
@@ -308,11 +322,17 @@ void load()
         while (n == sizeof(hdr)) {
             klen = ntohl(hdr.klen);
             dlen = ntohl(hdr.dlen);
+            ilen = ntohl(hdr.ilen);
+            tlen = ntohl(hdr.tlen);
             key = realloc(key, klen);
             data = realloc(data, dlen);
+            id = realloc(id, ilen);
+            type = realloc(type, tlen);
             n = read(fd, key, klen);
             n = read(fd, data, dlen);
-            e = put_el(NULL, namespace, key, data, ntohl(hdr.when), 0);
+            n = read(fd, id, ilen);
+            n = read(fd, type, tlen);
+            e = put_el(NULL, namespace, key, data, id, type, ntohl(hdr.when), 0);
             e->count = ntohl(hdr.count);
             n = read(fd, &hdr, sizeof(hdr));
         }
@@ -320,6 +340,8 @@ void load()
     }
     safe_free(key);
     safe_free(data);
+    safe_free(id);
+    safe_free(type);
     globfree(&g);
     utstring_free(ustr);
 }
@@ -329,13 +351,15 @@ void put_cb(struct evhttp_request *req, void *arg)
     struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     struct el *e;
-    char *namespace, *key, *data, *ts, *locale;
+    char *namespace, *key, *id, *type, *data, *ts, *locale;
     time_t when = time(NULL);
 
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key = (char *)evhttp_find_header(&args, "key");
     data = (char *)evhttp_find_header(&args, "data");
+    id = (char *)evhttp_find_header(&args, "id");
+    type = (char *)evhttp_find_header(&args, "type");
     ts = (char *)evhttp_find_header(&args, "ts");
     if (ts) {
         when = (time_t)strtol(ts, NULL, 10);
@@ -346,7 +370,7 @@ void put_cb(struct evhttp_request *req, void *arg)
     }
 
     if (namespace && key) {
-        e = put_el(locale, namespace, key, data, when, 1);
+        e = put_el(locale, namespace, key, data, id, type, when, 1);
         e->count += 1;
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
     } else {
@@ -493,14 +517,23 @@ void search_cb(struct evhttp_request *req, void *arg)
             HASH_SRT(rh, results, time_count_sort);
             for (e=results, i=0; e != NULL && i < limit; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
-                json_object_object_add(jsel, "k", json_object_new_string(e->key));
-                json_object_object_add(jsel, "d", json_object_new_string(e->data));
+                json_object_object_add(jsel, "name", json_object_new_string(e->key));
+                if (e->data != NULL) {
+                    json_object_object_add(jsel, "data", json_object_new_string(e->data));
+                }
+                if (e->id != NULL) {
+                    json_object_object_add(jsel, "id", json_object_new_string(e->id));
+                }
+                if (e->type != NULL) {
+                    json_object_object_add(jsel, "type", json_object_new_string(e->type));
+                }
+
                 json_object_array_add(jsresults, jsel);
                 fprintf(stderr, "elem key %s\n", e->key);
             }
             HASH_CLEAR(rh, results);
         }
-        json_object_object_add(jsobj, "r", jsresults);
+        json_object_object_add(jsobj, "results", jsresults);
         evbuffer_add_printf(buf, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
         json_object_put(jsobj);
