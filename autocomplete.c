@@ -259,9 +259,23 @@ void backup(int timer_fd, short event, void *arg)
              * key sz, data sz, time, count, key, data, id, type
              */
             hdr.klen = htonl(strlen(e->key)+1);
-            hdr.dlen = htonl(strlen(e->data)+1);
-            hdr.ilen = htonl(strlen(e->id)+1);
-            hdr.tlen = htonl(strlen(e->type)+1);
+
+            if (e->data != NULL) {
+                hdr.dlen = htonl(strlen(e->data)+1);
+            } else {
+                hdr.dlen = 0;
+            }
+            if (e->id != NULL) {
+                hdr.ilen = htonl(strlen(e->id)+1);
+            } else {
+                hdr.ilen = 0;
+            }
+            if (e->type != NULL) {
+                hdr.tlen = htonl(strlen(e->type)+1);
+            } else {
+                hdr.tlen = 0;
+            }
+
             hdr.when = htonl(e->when);
             hdr.count = htonl(e->count);
             n = write(fd, &hdr, sizeof(hdr));
@@ -271,9 +285,16 @@ void backup(int timer_fd, short event, void *arg)
                 break;
             }
             write(fd, e->key, strlen(e->key)+1);
-            write(fd, e->data, strlen(e->data)+1);
-            write(fd, e->id, strlen(e->id)+1);
-            write(fd, e->type, strlen(e->type)+1);
+
+            if (e->data != NULL) {
+                write(fd, e->data, strlen(e->data)+1);
+            }
+            if (e->id != NULL) {
+                write(fd, e->id, strlen(e->id)+1);
+            }
+            if (e->type != NULL) {
+               write(fd, e->type, strlen(e->type)+1);
+            }
         }
         if (ok) {
             rename(utstring_body(path1), gen_path(path2, db_dir, ns->name, ".bak"));
