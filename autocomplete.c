@@ -517,7 +517,7 @@ void search_cb(struct evhttp_request *req, void *arg)
             HASH_SRT(rh, results, time_count_sort);
             for (e=results, i=0; e != NULL && i < limit; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
-                json_object_object_add(jsel, "name", json_object_new_string(e->key));
+                json_object_object_add(jsel, "key", json_object_new_string(e->key));
                 if (e->data != NULL) {
                     json_object_object_add(jsel, "data", json_object_new_string(e->data));
                 }
