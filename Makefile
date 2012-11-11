@@ -3,7 +3,7 @@ TARGET ?= /usr/local
 LIBSIMPLEHTTP ?= ../simplehttp
 
 CFLAGS = -I$(LIBEVENT)/include -Wall -g -O0
-LIBS = -L$(LIBEVENT)/lib -levent -lm -ljson -licui18n -licuuc -licudata
+LIBS = -L$(LIBEVENT)/lib -levent -lm -lpthread -ljson -licui18n -licuuc -licudata
 
 autocomplete: autocomplete.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)

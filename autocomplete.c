@@ -16,14 +16,23 @@
 #include <time.h>
 #include <event.h>
 #include <evhttp.h>
+#include <pthread.h>
 
 #define NAME "autocomplete"
-#define VERSION "0.1"
+#define VERSION "0.2"
 #define DEBUG 1
 #define DEFAULT_PORT 8080
+#define EMPTY_STRING ""
+#define KEY_LEN(k) (k->len[0] + k->len[1] + 1)
 
-#define key_match(x) (strncmp(((struct el*)x)->key,key,strlen(key)) == 0)
+/*
+ *  N.B. These defines directly reference stack variables.
+ */
+#define key_match(x) (strncmp(((struct el*)x)->ckey->key,ckey->key,strlen(ckey->key)) == 0)
+#define key_id_match(x) (key_match(x) && strcmp(((struct el*)x)->ckey->id,ckey->id) == 0)
+#define dirty_match(x) (((struct namespace*)x)->dirty > 0)
 
+#define safe_strdup(s) (s ? strdup(s) : NULL)
 #define safe_free(s)    \
 if (s) {                \
     free(s);            \
@@ -35,10 +44,15 @@ if (s) {                \
 #define GLOBC(g) g.gl_pathc
 #endif
 
-typedef struct el {
+typedef struct composite_key {
     char *key;
     char *id;
-    char *type;
+    int len[2];
+    char data[1];
+} composite_key;
+
+typedef struct el {
+    composite_key *ckey;
     char *data;
     time_t when;
     int count;
@@ -50,33 +64,62 @@ struct namespace {
     char *name;
     int nelems;
     int dirty;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
     struct el *elems;
-    UT_hash_handle hh;
+    UT_hash_handle hh;  /* handle for key hash */
+    UT_hash_handle dh;  /* handle for dirty hash */
 };
 
 struct evhttp *httpd;
 struct namespace *spaces = NULL;
-int max_elems = 1000;
+struct event backup_timer;
+struct timeval backup_tv = {60, 0};
+static pthread_mutex_t master_lock;
 char *default_locale = ULOC_US;
 char *db_dir = NULL;
-struct event backup_timer;
-struct timeval backup_tv = {10, 0};
+int max_elems = 1000;
 
+void load_namespace(char *namespace);
 void put_cb(struct evhttp_request *req, void *arg);
 void search_cb(struct evhttp_request *req, void *arg);
-void incr_cb(struct evhttp_request *req, void *arg);
-void decr_cb(struct evhttp_request *req, void *arg);
 void del_cb(struct evhttp_request *req, void *arg);
 
 struct namespace *get_namespace(char *namespace)
 {
     struct namespace *ns = NULL;
+    pthread_mutex_lock(&master_lock);
     HASH_FIND_STR(spaces, namespace, ns);
+    pthread_mutex_unlock(&master_lock);
     return ns;
 }
 
-int key_sort(el *a, el *b) {
-    return strcasecmp(a->key, b->key);
+struct namespace *create_namespace(char *namespace, int *new)
+{
+    struct namespace *ns = NULL;
+
+    if (new) {
+        *new = 0;
+    }
+    HASH_FIND_STR(spaces, namespace, ns);
+    if (!ns) {
+        /*
+         *  This works because only one thread is ever adding namespaces.
+         */
+        if (new) {
+            *new = 1;
+        }
+        ns = malloc(sizeof(*ns));
+        memset(ns, 0, sizeof(*ns));
+        ns->name = strdup(namespace);
+        pthread_mutex_init(&ns->lock, NULL);
+        pthread_cond_init(&ns->cond, NULL);
+        pthread_mutex_lock(&master_lock);
+        HASH_ADD_KEYPTR(hh, spaces, ns->name, strlen(ns->name), ns);
+        pthread_mutex_unlock(&master_lock);
+        load_namespace(namespace);
+    }
+    return ns;
 }
 
 int time_count_sort(el *a, el *b) {
@@ -94,27 +137,10 @@ int time_count_sort(el *a, el *b) {
     return 0;
 }
 
-int time_count_rev_sort(el *a, el *b) {
-    if (a->when > b->when) {
-        return 1;
-    } else if (a->when < b->when) {
-        return -1;
-    } else {
-        if (a->count > b->count) {
-            return 1;
-        } else if (a->count < b->count) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 void free_el(struct el *e)
 {
     if (e) {
-        if (e->key) {
-            free(e->key);
-        }
+        safe_free(e->ckey);
         free(e);
     }
 }
@@ -164,22 +190,50 @@ char *utf8_tolower(char *s, char *locale)
     return buf2;
 }
 
-struct el *put_el(char *locale, char *namespace, char *key, char *data, char *id, char *type, time_t when, int mark_dirty)
+composite_key *make_key(char *locale, char *key, char *id)
+{
+    composite_key *ckey = NULL;
+    char *normalized_key;
+    int klen, ilen;
+    
+    if (!id) {
+        id = EMPTY_STRING;
+    }
+    normalized_key = utf8_tolower(key, locale);
+    if (normalized_key) {
+        klen = strlen(normalized_key);
+        ilen = strlen(id);
+        ckey = malloc(sizeof(*ckey) + klen + ilen + 1);
+        ckey->key = ckey->data;
+        strncpy(ckey->key, normalized_key, klen+1);
+        ckey->id = ckey->data + klen + 1;
+        strncpy(ckey->id, id, ilen+1);
+        ckey->len[0] = klen;
+        ckey->len[1] = ilen;
+        safe_free(normalized_key);
+    }
+    return ckey;
+}
+
+void print_el(struct el *e)
+{
+    fprintf(stderr, "%s:%s\n\tdata %s\n\twhen %ld\n\tcount %d\n", e->ckey->key,
+            e->ckey->id, e->data, e->when, e->count);
+}
+
+struct el *put_el(char *namespace, char *locale, char *key, char *id, char *data, time_t when, int mark)
 {
     struct namespace *ns;
-    struct el *e;
-    char *key_nrm = utf8_tolower(key, locale);
+    struct el *e = NULL;
+    composite_key *ckey;
+    int new;
 
-    ns = get_namespace(namespace);
-    if (!ns) {
-        ns = malloc(sizeof(*ns));
-        memset(ns, 0, sizeof(*ns));
-        ns->name = strdup(namespace);
-        HASH_ADD_KEYPTR(hh, spaces, ns->name, strlen(ns->name), ns);
+    ckey = make_key(locale, key, id);
+    if (!ckey) {
+        return NULL;
     }
-    if (mark_dirty) {
-        ns->dirty = 1;
-    }
+    ns = create_namespace(namespace, &new);
+    pthread_mutex_lock(&ns->lock);
     if (HASH_COUNT(ns->elems) > max_elems) {
         /*
          *  This is tricky. UT_hash keeps two sort orders.
@@ -189,182 +243,163 @@ struct el *put_el(char *locale, char *namespace, char *key, char *data, char *id
         HASH_DEL(ns->elems, e);
         free_el(e);
     }
-    fprintf(stderr, "looking for %s\n", key);
-    HASH_FIND_STR(ns->elems, key_nrm, e);
+    HASH_FIND(hh, ns->elems, ckey->data, KEY_LEN(ckey), e);
     if (e) {
-        fprintf(stderr, "delete %s\n", e->key);
         HASH_DEL(ns->elems, e);
-        safe_free(key_nrm);
+        safe_free(ckey);
     } else {
         e = malloc(sizeof(*e));
         memset(e, 0, sizeof(*e));
-        e->key = key_nrm;
+        e->ckey = ckey;
     }
     safe_free(e->data);
     e->data = (data ? strdup(data) : NULL);
-    safe_free(e->id);
-    e->id = (id ? strdup(id) : NULL);
-    safe_free(e->type);
-    e->type = (type ? strdup(type) : NULL);
     e->when = when;
-    HASH_ADD_KEYPTR(hh, ns->elems, e->key, strlen(e->key), e);
+    HASH_ADD_KEYPTR(hh, ns->elems, e->ckey->data, KEY_LEN(e->ckey), e);
+    if (mark) {
+        ns->dirty += 1;
+    }
+    pthread_mutex_unlock(&ns->lock);
 
     return e;
 }
 
-char *gen_path(UT_string *buf, char *dir, char *file, char *ext)
+void load_namespace(char *namespace)
 {
-    utstring_clear(buf);
-    utstring_printf(buf, "%s/%s%s", dir, file, ext);
-    return utstring_body(buf);
+    struct el *e;
+    UT_string *ustr;
+    int fd, n, klen, dlen, ilen;
+    char *key = NULL, *id = NULL, *data = NULL;
+    struct hdr {
+        uint32_t klen;
+        uint32_t ilen;
+        uint32_t dlen;
+        uint32_t when;
+        uint32_t count;
+    } hdr;
+    
+    if (!db_dir || !namespace) {
+        return;
+    }
+    
+    utstring_new(ustr);
+    utstring_printf(ustr, "%s/%s.bak", db_dir, namespace);
+    fd = open(utstring_body(ustr), O_RDONLY);
+    if (fd == -1) {
+        fprintf(stderr, "open() failed: %s: %s\n", utstring_body(ustr), strerror(errno));
+        utstring_free(ustr);
+        return;
+    }
+    n = read(fd, &hdr, sizeof(hdr));
+    fprintf(stderr, "loading: %s from %s\n", namespace, utstring_body(ustr));
+    while (n == sizeof(hdr)) {
+        klen = ntohl(hdr.klen);
+        ilen = ntohl(hdr.ilen);
+        dlen = ntohl(hdr.dlen);
+        key = realloc(key, klen);
+        id = realloc(id, ilen);
+        data = realloc(data, dlen);
+        n = read(fd, key, klen);
+        n = read(fd, id, ilen);
+        n = read(fd, data, dlen);
+        e = put_el(namespace, NULL, key, id, data, ntohl(hdr.when), 0);
+        e->count = ntohl(hdr.count);
+        n = read(fd, &hdr, sizeof(hdr));
+    }
+    close(fd);
+    safe_free(key);
+    safe_free(id);
+    safe_free(data);
+    utstring_free(ustr);
 }
 
-void backup(int timer_fd, short event, void *arg)
+void save_namespace(struct namespace *ns)
 {
-    struct namespace *ns;
     struct el *e;
     UT_string *path1, *path2;
     int fd, ok, n;
     struct hdr {
         uint32_t klen;
-        uint32_t dlen;
         uint32_t ilen;
-        uint32_t tlen;
+        uint32_t dlen;
         uint32_t when;
         uint32_t count;
     } hdr;
-
-    evtimer_set(&backup_timer, backup, NULL);
-    evtimer_add(&backup_timer, &backup_tv);
-
-    if (!db_dir) {
+    
+    if (!db_dir || !ns) {
         return;
     }
-    utstring_new(path1);
-    utstring_new(path2);
-    for (ns=spaces; ns != NULL; ns=ns->hh.next) {
-        if (!ns->dirty) {
-            continue;
-        }
-        ns->dirty = 0;
-        fd = open(gen_path(path1, db_dir, ns->name, ".tmp"), O_CREAT|O_TRUNC|O_RDWR, 0660);
-        if (fd == -1) {
-            fprintf(stderr, "Open failed: %s: %s\n", utstring_body(path1), strerror(errno));
-            continue;
-        }
-        fprintf(stderr, "Backing up: %s\n", ns->name);
-
-        for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
-            /*
-             * key sz, data sz, time, count, key, data, id, type
-             */
-            hdr.klen = htonl(strlen(e->key)+1);
-
-            if (e->data != NULL) {
-                hdr.dlen = htonl(strlen(e->data)+1);
-            } else {
-                hdr.dlen = 0;
-            }
-            if (e->id != NULL) {
-                hdr.ilen = htonl(strlen(e->id)+1);
-            } else {
-                hdr.ilen = 0;
-            }
-            if (e->type != NULL) {
-                hdr.tlen = htonl(strlen(e->type)+1);
-            } else {
-                hdr.tlen = 0;
-            }
-
-            hdr.when = htonl(e->when);
-            hdr.count = htonl(e->count);
-            n = write(fd, &hdr, sizeof(hdr));
-            if (n == -1) {
-                fprintf(stderr, "Write failed: %s: %s\n", utstring_body(path1), strerror(errno));
-                ok = 0;
-                break;
-            }
-            write(fd, e->key, strlen(e->key)+1);
-
-            if (e->data != NULL) {
-                write(fd, e->data, strlen(e->data)+1);
-            }
-            if (e->id != NULL) {
-                write(fd, e->id, strlen(e->id)+1);
-            }
-            if (e->type != NULL) {
-               write(fd, e->type, strlen(e->type)+1);
-            }
-        }
-        if (ok) {
-            rename(utstring_body(path1), gen_path(path2, db_dir, ns->name, ".bak"));
-        }
-        close(fd);
+    fprintf(stderr, "save_namespace %s %d\n", ns->name, ns->dirty);
+    
+    utstring_new(path1);    
+    utstring_printf(path1, "%s/%s.tmp", db_dir, ns->name);
+    fd = open(utstring_body(path1), O_CREAT|O_TRUNC|O_RDWR, 0660);
+    if (fd == -1) {
+        fprintf(stderr, "open failed: %s: %s\n", utstring_body(path1), strerror(errno));
+        utstring_free(path1);
+        return;
     }
+    fprintf(stderr, "backing up: %s\n", ns->name);
+    
+    pthread_mutex_lock(&ns->lock);
+    for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
+        hdr.klen = htonl(e->ckey->len[0]+1);
+        hdr.ilen = htonl(e->ckey->len[1]+1);
+        if (e->data != NULL) {
+            hdr.dlen = htonl(strlen(e->data)+1);
+        } else {
+            hdr.dlen = 0;
+        }        
+        hdr.when = htonl(e->when);
+        hdr.count = htonl(e->count);
+        n = write(fd, &hdr, sizeof(hdr));
+        if (n == -1) {
+            fprintf(stderr, "write failed: %s: %s\n", utstring_body(path1), strerror(errno));
+            ok = 0;
+            break;
+        }
+        write(fd, e->ckey->key, e->ckey->len[0]+1);
+        write(fd, e->ckey->id, e->ckey->len[1]+1);
+        if (e->data != NULL) {
+            write(fd, e->data, strlen(e->data)+1);
+        }
+    }
+    pthread_mutex_unlock(&ns->lock);
+
+    utstring_new(path2);    
+    utstring_printf(path2, "%s/%s.bak", db_dir, ns->name);
+    if (ok) {
+        rename(utstring_body(path1), utstring_body(path2));
+        ns->dirty = 0;
+    }
+    close(fd);
     utstring_free(path1);
     utstring_free(path2);
 }
 
-void load()
+void save_namespaces()
 {
-    struct el *e;
-    UT_string *ustr;
-    glob_t g;
-    int i, fd, n, klen, dlen, ilen, tlen;
-    char *s, *namespace, *key = NULL, *id = NULL, *type = NULL, *data = NULL;
-    struct hdr {
-        uint32_t klen;
-        uint32_t dlen;
-        uint32_t ilen;
-        uint32_t tlen;
-        uint32_t when;
-        uint32_t count;
-    } hdr;
-
-    if (!db_dir) {
-        return;
+    struct namespace *ns, *results = NULL;
+    int i;
+    
+    pthread_mutex_lock(&master_lock);
+    HASH_SELECT(dh, results, hh, spaces, dirty_match);
+    pthread_mutex_unlock(&master_lock);
+    for (ns=results, i=0; ns != NULL; ns=ns->dh.next, i++) {
+        save_namespace(ns);
     }
+    HASH_CLEAR(dh, results);
+}
 
-    utstring_new(ustr);
-    utstring_printf(ustr, "%s/*.bak", db_dir);
-    glob(utstring_body(ustr), 0, NULL, &g);
-    for (i=0; i < GLOBC(g); i++) {
-        fd = open(g.gl_pathv[i], O_RDONLY);
-        if (fd == -1) {
-            fprintf(stderr, "Open failed: %s: %s\n", g.gl_pathv[i], strerror(errno));
-            continue;
-        }
-        namespace = strrchr(g.gl_pathv[i], '/')+1;
-        s = strrchr(namespace, '.');
-        *s = '\0';
-
-        n = read(fd, &hdr, sizeof(hdr));
-        fprintf(stderr, "Loading: %s\n", namespace);
-        while (n == sizeof(hdr)) {
-            klen = ntohl(hdr.klen);
-            dlen = ntohl(hdr.dlen);
-            ilen = ntohl(hdr.ilen);
-            tlen = ntohl(hdr.tlen);
-            key = realloc(key, klen);
-            data = realloc(data, dlen);
-            id = realloc(id, ilen);
-            type = realloc(type, tlen);
-            n = read(fd, key, klen);
-            n = read(fd, data, dlen);
-            n = read(fd, id, ilen);
-            n = read(fd, type, tlen);
-            e = put_el(NULL, namespace, key, data, id, type, ntohl(hdr.when), 0);
-            e->count = ntohl(hdr.count);
-            n = read(fd, &hdr, sizeof(hdr));
-        }
-        close(fd);
-    }
-    safe_free(key);
-    safe_free(data);
-    safe_free(id);
-    safe_free(type);
-    globfree(&g);
-    utstring_free(ustr);
+void backup(int timer_fd, short event, void *arg)
+{
+    pthread_t id;
+    
+    fprintf(stderr, "backup\n");
+    evtimer_set(&backup_timer, backup, NULL);
+    pthread_create(&id, NULL, save_namespaces, NULL);
+    pthread_detach(&id);
+    evtimer_add(&backup_timer, &backup_tv);
 }
 
 void put_cb(struct evhttp_request *req, void *arg)
@@ -372,129 +407,32 @@ void put_cb(struct evhttp_request *req, void *arg)
     struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
     struct el *e;
-    char *namespace, *key, *id, *type, *data, *ts, *locale;
+    char *namespace, *key, *id, *data, *ts, *locale;
     time_t when = time(NULL);
 
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
-    key = (char *)evhttp_find_header(&args, "key");
-    data = (char *)evhttp_find_header(&args, "data");
-    id = (char *)evhttp_find_header(&args, "id");
-    type = (char *)evhttp_find_header(&args, "type");
-    ts = (char *)evhttp_find_header(&args, "ts");
+    key =       (char *)evhttp_find_header(&args, "key");
+    data =      (char *)evhttp_find_header(&args, "data");
+    id =        (char *)evhttp_find_header(&args, "id");
+    locale =    (char *)evhttp_find_header(&args, "locale");
+    ts =        (char *)evhttp_find_header(&args, "ts");
     if (ts) {
         when = (time_t)strtol(ts, NULL, 10);
     }
-    locale = (char *)evhttp_find_header(&args, "locale");
-    if (DEBUG) {
-        fprintf(stderr, "/put_cb %s %s\n", namespace, key);
-    }
 
     if (namespace && key) {
-        e = put_el(locale, namespace, key, data, id, type, when, 1);
-        e->count += 1;
-        evhttp_send_reply(req, HTTP_OK, "OK", buf);
-    } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
-    }
-
-    evhttp_clear_headers(&args);
-    evbuffer_free(buf);
-}
-
-void del_cb(struct evhttp_request *req, void *arg)
-{
-    struct evbuffer *buf = evbuffer_new();
-    struct evkeyvalq args;
-    char *namespace, *locale, *qkey, *key = NULL;
-    struct el *e;
-    struct namespace *ns;
-
-    evhttp_parse_query(req->uri, &args);
-    namespace = (char *)evhttp_find_header(&args, "namespace");
-    locale = (char *)evhttp_find_header(&args, "locale");
-    qkey = (char *)evhttp_find_header(&args, "key");
-    if (qkey) {
-        key = utf8_tolower(qkey, locale);
-    }
-
-    if (DEBUG) {
-        fprintf(stderr, "/search_cb %s %s\n", namespace, key);
-    }
-
-    if (namespace && key) {
-        ns = get_namespace(namespace);
-        if (ns) {
-            HASH_FIND_STR(ns->elems, key, e);
-            if (e) {
-                HASH_DEL(ns->elems, e);
-                free_el(e);
-                evhttp_send_reply(req, HTTP_OK, "OK", buf);
-            } else {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", buf);
-            }
+        e = put_el(namespace, locale, key, id, data, when, 1);
+        if (e) {
+            e->count += 1;
+            evhttp_send_reply(req, HTTP_OK, "OK", buf);
         } else {
-            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);
+            evhttp_send_reply(req, HTTP_INTERNAL, "ERR", buf);
         }
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
 
-    safe_free(key);
-    evhttp_clear_headers(&args);
-    evbuffer_free(buf);
-}
-
-void incr_cb(struct evhttp_request *req, void *arg)
-{
-    struct evbuffer *buf = evbuffer_new();
-    struct evkeyvalq args;
-    char *namespace, *locale, *svalue, *qkey, *key = NULL;
-    struct el *e;
-    int value = 0;
-    struct namespace *ns;
-
-    evhttp_parse_query(req->uri, &args);
-    namespace = (char *)evhttp_find_header(&args, "namespace");
-    locale = (char *)evhttp_find_header(&args, "locale");
-    qkey = (char *)evhttp_find_header(&args, "key");
-    if (qkey) {
-        key = utf8_tolower(qkey, locale);
-    }
-    svalue = (char *)evhttp_find_header(&args, "value");
-    if (svalue) {
-        value = atoi(svalue);
-        if (arg) {  // this is a decr
-            value = -value;
-        }
-    }
-
-    if (DEBUG) {
-        fprintf(stderr, "/incr_cb %s %s\n", namespace, key);
-    }
-
-    if (namespace && key && value) {
-        ns = get_namespace(namespace);
-        if (ns) {
-            HASH_FIND_STR(ns->elems, key, e);
-            if (e) {
-                e->count += value;
-                if (e->count <= 0) {
-                    HASH_DEL(ns->elems, e);
-                    free_el(e);
-                }
-                evhttp_send_reply(req, HTTP_OK, "OK", buf);
-            } else {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "KEY_NOT_FOUND", buf);
-            }
-        } else {
-            evhttp_send_reply(req, HTTP_NOTFOUND, "NAMESPACE_NOT_FOUND", buf);
-        }
-    } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
-    }
-
-    safe_free(key);
     evhttp_clear_headers(&args);
     evbuffer_free(buf);
 }
@@ -503,56 +441,54 @@ void search_cb(struct evhttp_request *req, void *arg)
 {
     struct evbuffer *buf = evbuffer_new();
     struct evkeyvalq args;
-    char *namespace, *slimit, *locale, *qkey, *key = NULL;
+    composite_key *ckey;
+    char *namespace, *slimit, *locale, *ts, *id, *key;
     struct json_object *jsobj, *jsel, *jsresults;
     struct el *e, *results = NULL;
     struct namespace *ns;
     int i, limit = 100;
-
+    time_t when = 0;
+    
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
-    locale = (char *)evhttp_find_header(&args, "locale");
-    qkey = (char *)evhttp_find_header(&args, "key");
-    if (qkey) {
-        key = utf8_tolower(qkey, locale);
-    }
-    slimit = (char *)evhttp_find_header(&args, "limit");
+    key =       (char *)evhttp_find_header(&args, "key");
+    id =        (char *)evhttp_find_header(&args, "id");
+    locale =    (char *)evhttp_find_header(&args, "locale");
+    slimit =    (char *)evhttp_find_header(&args, "limit");
+    ts =        (char *)evhttp_find_header(&args, "ts");
     if (slimit) {
         limit = atoi(slimit);
     }
-
-    if (DEBUG) {
-        fprintf(stderr, "/search_cb %s %s\n", namespace, key);
+    if (ts) {
+        when = (time_t)strtol(ts, NULL, 10);
     }
-
+    
     if (namespace && key) {
         jsobj = json_object_new_object();
         jsresults = json_object_new_array();
         ns = get_namespace(namespace);
         if (ns) {
-            /*
-             *  UT_hash does not offer a reentrant select func, so we will
-             *  define it such that we have access to the stack.
-             */
-            HASH_SELECT(rh, results, hh, ns->elems, key_match);
+            ckey = make_key(locale, key, id);
+            pthread_mutex_lock(&ns->lock);            
+            
+            HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
             HASH_SRT(rh, results, time_count_sort);
-            for (e=results, i=0; e != NULL && i < limit; e=e->rh.next, i++) {
+            for (e=results, i=0; e != NULL && i < limit && e->when > when; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
-                json_object_object_add(jsel, "key", json_object_new_string(e->key));
+                json_object_object_add(jsel, "key", json_object_new_string(e->ckey->key));
+                json_object_object_add(jsel, "id", json_object_new_string(e->ckey->id));
+                json_object_object_add(jsel, "when", json_object_new_int(e->when));
+                json_object_object_add(jsel, "count", json_object_new_int(e->count));
                 if (e->data != NULL) {
                     json_object_object_add(jsel, "data", json_object_new_string(e->data));
                 }
-                if (e->id != NULL) {
-                    json_object_object_add(jsel, "id", json_object_new_string(e->id));
-                }
-                if (e->type != NULL) {
-                    json_object_object_add(jsel, "type", json_object_new_string(e->type));
-                }
-
                 json_object_array_add(jsresults, jsel);
-                fprintf(stderr, "elem key %s\n", e->key);
+                fprintf(stderr, "elem key %s\n", e->ckey->key);
             }
             HASH_CLEAR(rh, results);
+
+            pthread_mutex_unlock(&ns->lock);
+            safe_free(ckey);
         }
         json_object_object_add(jsobj, "results", jsresults);
         evbuffer_add_printf(buf, "%s\n", (char *)json_object_to_json_string(jsobj));
@@ -561,11 +497,11 @@ void search_cb(struct evhttp_request *req, void *arg)
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
     }
-
-    safe_free(key);
+    
     evhttp_clear_headers(&args);
     evbuffer_free(buf);
 }
+
 
 void termination_handler(int signum)
 {
@@ -605,6 +541,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, termination_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    pthread_mutex_init(&master_lock, NULL);
     uloc_setDefault(default_locale, &err);
     if (U_FAILURE(err)) {
         fprintf(stderr, "Could not set default location: %s: %s\n", default_locale, u_errorName(err));
@@ -612,7 +549,6 @@ int main(int argc, char **argv)
     }
 
     event_init();
-    load();
     backup(0,0,NULL);
 
     httpd = evhttp_start(address, port);
@@ -622,14 +558,11 @@ int main(int argc, char **argv)
     }
 
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
-    evhttp_set_cb(httpd, "/del", del_cb, NULL);
-    evhttp_set_cb(httpd, "/incr", incr_cb, NULL);
-    evhttp_set_cb(httpd, "/decr", incr_cb, (void *)'d');
     evhttp_set_cb(httpd, "/search", search_cb, NULL);
-
     fprintf(stdout, "Starting %s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
 
     event_dispatch();
     evhttp_free(httpd);
+    save_namespaces();
     return 0;
 }
