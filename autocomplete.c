@@ -65,7 +65,6 @@ struct namespace {
     int nelems;
     int dirty;
     pthread_mutex_t lock;
-    pthread_cond_t cond;
     struct el *elems;
     UT_hash_handle hh;  /* handle for key hash */
     UT_hash_handle dh;  /* handle for dirty hash */
@@ -76,9 +75,11 @@ struct namespace *spaces = NULL;
 struct event backup_timer;
 struct timeval backup_tv = {60, 0};
 static pthread_mutex_t master_lock;
+static pthread_cond_t backup_cond;
 char *default_locale = ULOC_US;
 char *db_dir = NULL;
 int max_elems = 1000;
+int is_running = 1;
 
 void load_namespace(char *namespace);
 void put_cb(struct evhttp_request *req, void *arg);
@@ -113,7 +114,6 @@ struct namespace *create_namespace(char *namespace, int *new)
         memset(ns, 0, sizeof(*ns));
         ns->name = strdup(namespace);
         pthread_mutex_init(&ns->lock, NULL);
-        pthread_cond_init(&ns->cond, NULL);
         pthread_mutex_lock(&master_lock);
         HASH_ADD_KEYPTR(hh, spaces, ns->name, strlen(ns->name), ns);
         pthread_mutex_unlock(&master_lock);
@@ -391,14 +391,24 @@ void save_namespaces()
     HASH_CLEAR(dh, results);
 }
 
+void *backup_thread(void *ctx)
+{
+    pthread_mutex_lock(&master_lock);
+    while (is_running) {
+        pthread_cond_wait(&backup_cond, &master_lock);
+        pthread_mutex_unlock(&master_lock);
+        save_namespaces();
+    }
+    return NULL;
+}
+
 void backup(int timer_fd, short event, void *arg)
 {
-    pthread_t id;
-    
     fprintf(stderr, "backup\n");
     evtimer_set(&backup_timer, backup, NULL);
-    pthread_create(&id, NULL, save_namespaces, NULL);
-    pthread_detach(&id);
+    pthread_mutex_lock(&master_lock);
+    pthread_cond_signal(&backup_cond);
+    pthread_mutex_unlock(&master_lock);
     evtimer_add(&backup_timer, &backup_tv);
 }
 
@@ -446,7 +456,7 @@ void search_cb(struct evhttp_request *req, void *arg)
     struct json_object *jsobj, *jsel, *jsresults;
     struct el *e, *results = NULL;
     struct namespace *ns;
-    int i, limit = 100;
+    int i, new, limit = 100;
     time_t when = 0;
     
     evhttp_parse_query(req->uri, &args);
@@ -466,12 +476,16 @@ void search_cb(struct evhttp_request *req, void *arg)
     if (namespace && key) {
         jsobj = json_object_new_object();
         jsresults = json_object_new_array();
-        ns = get_namespace(namespace);
+        ns = create_namespace(namespace, &new);
         if (ns) {
             ckey = make_key(locale, key, id);
             pthread_mutex_lock(&ns->lock);            
             
-            HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
+            if (id) {
+                HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
+            } else {
+                HASH_SELECT(rh, results, hh, ns->elems, key_match);
+            }
             HASH_SRT(rh, results, time_count_sort);
             for (e=results, i=0; e != NULL && i < limit && e->when > when; e=e->rh.next, i++) {
                 jsel = json_object_new_object();
@@ -507,12 +521,14 @@ void termination_handler(int signum)
 {
     fprintf(stdout, "Shutting down...\n");
     event_loopbreak();
+    is_running = 0;
 }
 
 int main(int argc, char **argv)
 {
     int opt;
     int port = DEFAULT_PORT;
+    pthread_t id;
     char *address = "0.0.0.0";
     UErrorCode err = U_ZERO_ERROR;
 
@@ -542,6 +558,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     pthread_mutex_init(&master_lock, NULL);
+    pthread_cond_init(&backup_cond, NULL);
     uloc_setDefault(default_locale, &err);
     if (U_FAILURE(err)) {
         fprintf(stderr, "Could not set default location: %s: %s\n", default_locale, u_errorName(err));
@@ -549,6 +566,8 @@ int main(int argc, char **argv)
     }
 
     event_init();
+    pthread_create(&id, NULL, backup_thread, NULL);
+    pthread_detach(id);
     backup(0,0,NULL);
 
     httpd = evhttp_start(address, port);
