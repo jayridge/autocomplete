@@ -31,7 +31,7 @@ is also provided.
 `key` (req) - key for future searches  
 `locale` (opt) - locale used to normalize key ( see libicu )  
 `id` (opt) - secondary element for uniq  
-`data` (opt) - opaque data element returned on search
+`data` (opt) - opaque data element returned on search  
 `ts` (opt) - utc timestamp of last used  
 
 #### side effects
