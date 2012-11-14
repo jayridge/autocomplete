@@ -339,7 +339,6 @@ void save_namespace(struct namespace *ns)
         utstring_free(path1);
         return;
     }
-    fprintf(stderr, "backing up: %s\n", ns->name);
     
     pthread_mutex_lock(&ns->lock);
     for (ok=1, e=ns->elems; e != NULL; e=e->hh.next) {
@@ -404,7 +403,6 @@ void *backup_thread(void *ctx)
 
 void backup(int timer_fd, short event, void *arg)
 {
-    fprintf(stderr, "backup\n");
     evtimer_set(&backup_timer, backup, NULL);
     pthread_mutex_lock(&master_lock);
     pthread_cond_signal(&backup_cond);

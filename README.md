@@ -15,7 +15,7 @@ is also provided.
 
 ## installation
 
-make && make install
+    make && make install
 
 ## running
 
@@ -23,17 +23,18 @@ make && make install
 
 ## api
 
-*GET /put*
+###*GET /put*
 
-### args
+#### args
 
-namespace (req) - high level aggregation, typically user  
-key (req) - key for future searches  
-locale (opt) - locale used to normalize key ( see libicu )  
-id (opt) - secondary element for uniq  
-ts (opt) - utc timestamp of last used  
+`namespace` (req) - high level aggregation, typically user  
+`key` (req) - key for future searches  
+`locale` (opt) - locale used to normalize key ( see libicu )  
+`id` (opt) - secondary element for uniq  
+`data` (opt) - opaque data element returned on search
+`ts` (opt) - utc timestamp of last used  
 
-### side effects
+#### side effects
 
 Either creates a new element or updates an existing elements
 position in the recency list. The namespace is also marked
@@ -41,28 +42,28 @@ dirty for subsequent flushing to disk.
 
 Initial access of namespace can force a read from disk.
 
-### response
+#### response
 
 200 OK  
 500 INTERNAL  
 400 BAD_REQUEST  
 
 
-*GET /search*
+###*GET /search*
 
-### args
+#### args
 
-namespace (req) - high level aggregation, typically user  
-key (req) - key for future searches  
-locale (opt) - locale used to normalize key ( see libicu )  
-id (opt) - secondary element for uniq  
-limit (opt:1,000) - max records to return
+`namespace` (req) - high level aggregation, typically user  
+`key` (req) - key for future searches  
+`locale` (opt) - locale used to normalize key ( see libicu )  
+`id` (opt) - secondary element for uniq  
+`limit` (opt:1,000) - max records to return
 
-### side effects
+#### side effects
 
 Initial access of namespace can force a read from disk.
 
-### response
+#### response
 
 200 OK  
 ```json
