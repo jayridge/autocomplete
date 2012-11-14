@@ -140,6 +140,7 @@ int time_count_sort(el *a, el *b) {
 void free_el(struct el *e)
 {
     if (e) {
+        safe_free(e->data);
         safe_free(e->ckey);
         free(e);
     }
@@ -445,6 +446,43 @@ void put_cb(struct evhttp_request *req, void *arg)
     evbuffer_free(buf);
 }
 
+void del_cb(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *buf = evbuffer_new();
+    struct evkeyvalq args;
+    struct namespace *ns;
+    composite_key *ckey;
+    struct el *e;
+    char *namespace, *key, *id, *locale;
+    
+    evhttp_parse_query(req->uri, &args);
+    namespace = (char *)evhttp_find_header(&args, "namespace");
+    key =       (char *)evhttp_find_header(&args, "key");
+    id =        (char *)evhttp_find_header(&args, "id");
+    locale =    (char *)evhttp_find_header(&args, "locale");
+    
+    if (namespace && key) {
+        ns = get_namespace(namespace);
+        if (ns) {
+            ckey = make_key(locale, key, id);
+            pthread_mutex_lock(&ns->lock);            
+            HASH_FIND(hh, ns->elems, ckey->data, KEY_LEN(ckey), e);
+            if (e) {
+                HASH_DEL(ns->elems, e);
+            }
+            pthread_mutex_unlock(&ns->lock);
+            free_el(e);
+            safe_free(ckey);
+        }        
+        evhttp_send_reply(req, HTTP_OK, "OK", buf);
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
+    }
+    
+    evhttp_clear_headers(&args);
+    evbuffer_free(buf);
+}
+
 void search_cb(struct evhttp_request *req, void *arg)
 {
     struct evbuffer *buf = evbuffer_new();
@@ -495,7 +533,6 @@ void search_cb(struct evhttp_request *req, void *arg)
                     json_object_object_add(jsel, "data", json_object_new_string(e->data));
                 }
                 json_object_array_add(jsresults, jsel);
-                fprintf(stderr, "elem key %s\n", e->ckey->key);
             }
             HASH_CLEAR(rh, results);
 
@@ -575,6 +612,7 @@ int main(int argc, char **argv)
     }
 
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
+    evhttp_set_cb(httpd, "/del", del_cb, NULL);
     evhttp_set_cb(httpd, "/search", search_cb, NULL);
     fprintf(stdout, "Starting %s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
 

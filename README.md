@@ -49,6 +49,26 @@ Initial access of namespace can force a read from disk.
 400 BAD_REQUEST  
 
 
+###*GET /del*
+
+#### args
+
+`namespace` (req) - high level aggregation, typically user  
+`key` (req) - key for future searches  
+`locale` (opt) - locale used to normalize key ( see libicu )  
+`id` (opt) - secondary element for uniq  
+
+#### side effects
+
+Deletes an element identified by key and id. The namespace is
+marked dirty for subsequent flushing to disk.
+
+#### response
+
+200 OK  
+400 BAD_REQUEST  
+
+
 ###*GET /search*
 
 #### args
