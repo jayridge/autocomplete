@@ -4,7 +4,9 @@
 #include <unistd.h>
 #include <glob.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/uio.h>
+#include <sys/stat.h>
 #include <arpa/inet.h>
 #include <unicode/uloc.h>
 #include <unicode/utypes.h>
@@ -19,7 +21,7 @@
 #include <pthread.h>
 
 #define NAME "autocomplete"
-#define VERSION "0.2"
+#define VERSION "0.3"
 #define DEBUG 1
 #define DEFAULT_PORT 8080
 #define EMPTY_STRING ""
@@ -85,6 +87,75 @@ void load_namespace(char *namespace);
 void put_cb(struct evhttp_request *req, void *arg);
 void search_cb(struct evhttp_request *req, void *arg);
 void del_cb(struct evhttp_request *req, void *arg);
+
+
+uint16_t crc16(const uint8_t *buffer, int size) {
+    uint16_t crc = 0xFFFF;
+    
+    while (size--) {
+        crc = (crc >> 8) | (crc << 8); 
+        crc ^= *buffer++;
+        crc ^= ((unsigned char) crc) >> 4;
+        crc ^= crc << 12; 
+        crc ^= (crc & 0xFF) << 5;
+    }   
+    return crc;
+}
+
+char *utstring_varappend(UT_string *ustr, ...)
+{
+    va_list argp;
+    char *s;
+    
+    va_start(argp, ustr);
+    while ((s = va_arg(argp, char *)) != NULL) {
+        utstring_bincpy(ustr, s, strlen(s));
+    }
+    va_end(argp);
+    return utstring_body(ustr);
+}
+
+char *namespace_path(UT_string *path, char *namespace)
+{
+    char buf[7];
+    union {
+        uint16_t i;
+        uint8_t s[2];
+    } crc;
+    
+    crc.i = crc16((const uint8_t *)namespace, strlen(namespace));
+    sprintf(buf, "/%hx/%hx", crc.s[0], crc.s[1]);
+    utstring_varappend(path, db_dir, buf, NULL);
+    return utstring_body(path);
+}
+
+void make_nested_dirs()
+{
+    int i, j;
+    char a[4], b[4];
+    UT_string *path;
+    
+    utstring_new(path);
+    for (i=0; i<256; i++) {
+        sprintf(a, "/%hx", i);
+        utstring_clear(path);
+        utstring_varappend(path, db_dir, a, NULL);
+        if (mkdir(utstring_body(path), 0770) != 0 && errno != EEXIST) {
+            fprintf(stderr, "mkdir(%s) failed: %s\n", utstring_body(path), strerror(errno));
+            exit(1);
+        }
+        for (j=0; j<256; j++) {
+            sprintf(b, "/%hx", j);
+            utstring_clear(path);
+            utstring_varappend(path, db_dir, a, b, NULL);
+            if (mkdir(utstring_body(path), 0770) != 0 && errno != EEXIST) {
+                fprintf(stderr, "mkdir(%s) failed: %s\n", utstring_body(path), strerror(errno));
+                exit(1);
+            }
+        }
+    }
+    utstring_free(path);
+}
 
 struct namespace *get_namespace(char *namespace)
 {
@@ -284,7 +355,7 @@ void load_namespace(char *namespace)
     }
     
     utstring_new(ustr);
-    utstring_printf(ustr, "%s/%s.bak", db_dir, namespace);
+    namespace_path(ustr, namespace);
     fd = open(utstring_body(ustr), O_RDONLY);
     if (fd == -1) {
         fprintf(stderr, "open() failed: %s: %s\n", utstring_body(ustr), strerror(errno));
@@ -332,8 +403,9 @@ void save_namespace(struct namespace *ns)
     }
     fprintf(stderr, "save_namespace %s %d\n", ns->name, ns->dirty);
     
-    utstring_new(path1);    
-    utstring_printf(path1, "%s/%s.tmp", db_dir, ns->name);
+    utstring_new(path1);
+    namespace_path(path1, ns->name);
+    utstring_bincpy(path1, ".tmp", 5);
     fd = open(utstring_body(path1), O_CREAT|O_TRUNC|O_RDWR, 0660);
     if (fd == -1) {
         fprintf(stderr, "open failed: %s: %s\n", utstring_body(path1), strerror(errno));
@@ -366,8 +438,8 @@ void save_namespace(struct namespace *ns)
     }
     pthread_mutex_unlock(&ns->lock);
 
-    utstring_new(path2);    
-    utstring_printf(path2, "%s/%s.bak", db_dir, ns->name);
+    utstring_new(path2);
+    namespace_path(path2, ns->name);
     if (ok) {
         rename(utstring_body(path1), utstring_body(path2));
         ns->dirty = 0;
@@ -600,6 +672,12 @@ int main(int argc, char **argv)
         exit(1);
     }
 
+    if (db_dir) {
+        if (db_dir[strlen(db_dir)] == '/') {
+            db_dir[strlen(db_dir)] = '\0';
+        }
+        make_nested_dirs();
+    }
     event_init();
     pthread_create(&id, NULL, backup_thread, NULL);
     pthread_detach(id);
