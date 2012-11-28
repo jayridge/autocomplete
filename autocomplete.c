@@ -555,6 +555,48 @@ void del_cb(struct evhttp_request *req, void *arg)
     evbuffer_free(buf);
 }
 
+void nuke_cb(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *buf = evbuffer_new();
+    struct evkeyvalq args;
+    struct namespace *ns;
+    composite_key *ckey;
+    char *namespace, *key, *id, *locale;
+    struct el *e, *results = NULL, *tmp = NULL;
+    
+    evhttp_parse_query(req->uri, &args);
+    namespace = (char *)evhttp_find_header(&args, "namespace");
+    key =       (char *)evhttp_find_header(&args, "key");
+    id =        (char *)evhttp_find_header(&args, "id");
+    locale =    (char *)evhttp_find_header(&args, "locale");
+    
+    if (namespace && key) {
+        ns = get_namespace(namespace);
+        if (ns) {
+            ckey = make_key(locale, key, id);
+            pthread_mutex_unlock(&ns->lock);
+            if (id) {
+                HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
+            } else {
+                HASH_SELECT(rh, results, hh, ns->elems, key_match);
+            }
+            HASH_ITER(rh, results, e, tmp) {
+                HASH_DEL(results, e);  /* delete; users advances to next */
+                free_el(e);
+            }
+            safe_free(ckey);
+            HASH_CLEAR(rh, results);
+            pthread_mutex_unlock(&ns->lock);
+        }        
+        evhttp_send_reply(req, HTTP_OK, "OK", buf);
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
+    }
+    
+    evhttp_clear_headers(&args);
+    evbuffer_free(buf);
+}
+
 void search_cb(struct evhttp_request *req, void *arg)
 {
     struct evbuffer *buf = evbuffer_new();
@@ -691,6 +733,7 @@ int main(int argc, char **argv)
 
     evhttp_set_cb(httpd, "/put", put_cb, NULL);
     evhttp_set_cb(httpd, "/del", del_cb, NULL);
+    evhttp_set_cb(httpd, "/nuke", nuke_cb, NULL);
     evhttp_set_cb(httpd, "/search", search_cb, NULL);
     fprintf(stdout, "Starting %s (%s) listening on: %s:%d\n", NAME, VERSION, address, port);
 
