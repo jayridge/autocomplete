@@ -75,9 +75,9 @@ marked dirty for subsequent flushing to disk.
 
 #### args
 
-`namespace` (req) - high level aggregation, typically user
-`key` (req) - key prefix
-`locale` (opt) - locale used to normalize key ( see libicu )
+`namespace` (req) - high level aggregation, typically user  
+`key` (req) - key prefix  
+`locale` (opt) - locale used to normalize key ( see libicu )  
 
 #### side effects
 
