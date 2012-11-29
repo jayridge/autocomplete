@@ -9,9 +9,11 @@ is also provided.
 
 ## deps
 
-1. libevent 2.x
-2. json-c
-3. libicu
+1. [http://libevent.org/](libevent 2.x)
+2. [https://github.com/json-c/json-c.git](json-c)
+3. [http://site.icu-project.org/download](libicu)
+
+*N.B. compile libicu with utf-8 define*
 
 ## installation
 
@@ -67,6 +69,25 @@ marked dirty for subsequent flushing to disk.
 
 200 OK  
 400 BAD_REQUEST  
+
+
+###*GET /nuke*
+
+#### args
+
+`namespace` (req) - high level aggregation, typically user
+`key` (req) - key prefix
+`locale` (opt) - locale used to normalize key ( see libicu )
+
+#### side effects
+
+Deletes elements matching key prefix. The namespace is
+marked dirty for subsequent flushing to disk.
+
+#### response
+
+200 OK
+400 BAD_REQUEST
 
 
 ###*GET /search*
