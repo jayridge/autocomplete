@@ -124,8 +124,8 @@ char *namespace_path(UT_string *path, char *namespace)
     } crc;
     
     crc.i = crc16((const uint8_t *)namespace, strlen(namespace));
-    sprintf(buf, "/%hx/%hx", crc.s[0], crc.s[1]);
-    utstring_varappend(path, db_dir, buf, NULL);
+    sprintf(buf, "/%hx/%hx/", crc.s[0], crc.s[1]);
+    utstring_varappend(path, db_dir, buf, namespace, NULL);
     return utstring_body(path);
 }
 
