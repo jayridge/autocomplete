@@ -76,7 +76,7 @@ marked dirty for subsequent flushing to disk.
 #### args
 
 `namespace` (req) - high level aggregation, typically user  
-`key` (req) - key prefix  
+`key` (opt) - key prefix, if not present nuke all
 `locale` (opt) - locale used to normalize key ( see libicu )  
 
 #### side effects
@@ -95,7 +95,7 @@ marked dirty for subsequent flushing to disk.
 #### args
 
 `namespace` (req) - high level aggregation, typically user  
-`key` (req) - key for future searches  
+`key` (opt) - key prefix match, if not passed matches all
 `locale` (opt) - locale used to normalize key ( see libicu )  
 `id` (opt) - secondary element for uniq  
 `limit` (opt:1,000) - max records to return

@@ -268,6 +268,9 @@ composite_key *make_key(char *locale, char *key, char *id)
     char *normalized_key;
     int klen, ilen;
     
+    if (!key) {
+        key = EMPTY_STRING;
+    }
     if (!id) {
         id = EMPTY_STRING;
     }
@@ -570,7 +573,7 @@ void nuke_cb(struct evhttp_request *req, void *arg)
     id =        (char *)evhttp_find_header(&args, "id");
     locale =    (char *)evhttp_find_header(&args, "locale");
     
-    if (namespace && key) {
+    if (namespace) {
         ns = get_namespace(namespace);
         if (ns) {
             ckey = make_key(locale, key, id);
@@ -581,7 +584,7 @@ void nuke_cb(struct evhttp_request *req, void *arg)
                 HASH_SELECT(rh, results, hh, ns->elems, key_match);
             }
             HASH_ITER(rh, results, e, tmp) {
-                HASH_DEL(results, e);  /* delete; users advances to next */
+                HASH_DEL(ns->elems, e);  /* delete; users advances to next */
                 free_el(e);
             }
             safe_free(ckey);
@@ -623,7 +626,7 @@ void search_cb(struct evhttp_request *req, void *arg)
         when = (time_t)strtol(ts, NULL, 10);
     }
     
-    if (namespace && key) {
+    if (namespace) {
         jsobj = json_object_new_object();
         jsresults = json_object_new_array();
         ns = create_namespace(namespace, &new);
