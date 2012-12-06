@@ -494,6 +494,7 @@ void put_cb(struct evhttp_request *req, void *arg)
     char *namespace, *key, *id, *data, *ts, *locale;
     time_t when = time(NULL);
 
+    fprintf(stderr, "%s\n", req->uri);
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key =       (char *)evhttp_find_header(&args, "key");
@@ -530,6 +531,7 @@ void del_cb(struct evhttp_request *req, void *arg)
     struct el *e;
     char *namespace, *key, *id, *locale;
     
+    fprintf(stderr, "%s\n", req->uri);
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key =       (char *)evhttp_find_header(&args, "key");
@@ -567,6 +569,7 @@ void nuke_cb(struct evhttp_request *req, void *arg)
     char *namespace, *key, *id, *locale;
     struct el *e, *results = NULL, *tmp = NULL;
     
+    fprintf(stderr, "%s\n", req->uri);
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key =       (char *)evhttp_find_header(&args, "key");
@@ -612,6 +615,7 @@ void search_cb(struct evhttp_request *req, void *arg)
     int i, new, limit = 100;
     time_t when = 0;
     
+    fprintf(stderr, "%s\n", req->uri);
     evhttp_parse_query(req->uri, &args);
     namespace = (char *)evhttp_find_header(&args, "namespace");
     key =       (char *)evhttp_find_header(&args, "key");
