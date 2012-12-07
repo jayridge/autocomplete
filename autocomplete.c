@@ -30,8 +30,8 @@
 /*
  *  N.B. These defines directly reference stack variables.
  */
-#define key_match(x) (strncmp(((struct el*)x)->ckey->key,ckey->key,strlen(ckey->key)) == 0)
-#define key_id_match(x) (key_match(x) && strcmp(((struct el*)x)->ckey->id,ckey->id) == 0)
+#define key_match(x) (!ckey->key || strncmp(((struct el*)x)->ckey->key,ckey->key,strlen(ckey->key)) == 0)
+#define key_id_match(x) (key_match(x) && (!ckey->id ||  strcmp(((struct el*)x)->ckey->id,ckey->id) == 0))
 #define dirty_match(x) (((struct namespace*)x)->dirty > 0)
 
 #define safe_strdup(s) (s ? strdup(s) : NULL)
@@ -540,8 +540,8 @@ void del_cb(struct evhttp_request *req, void *arg)
     
     if (namespace && key) {
         ns = get_namespace(namespace);
-        if (ns) {
-            ckey = make_key(locale, key, id);
+        ckey = make_key(locale, key, id);
+        if (ns && ckey) {
             pthread_mutex_lock(&ns->lock);            
             HASH_FIND(hh, ns->elems, ckey->data, KEY_LEN(ckey), e);
             if (e) {
@@ -549,8 +549,8 @@ void del_cb(struct evhttp_request *req, void *arg)
             }
             pthread_mutex_unlock(&ns->lock);
             free_el(e);
-            safe_free(ckey);
         }        
+        safe_free(ckey);
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
@@ -578,8 +578,8 @@ void nuke_cb(struct evhttp_request *req, void *arg)
     
     if (namespace) {
         ns = get_namespace(namespace);
-        if (ns) {
-            ckey = make_key(locale, key, id);
+        ckey = make_key(locale, key, id);
+        if (ns && ckey) {
             pthread_mutex_unlock(&ns->lock);
             if (id) {
                 HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
@@ -594,6 +594,7 @@ void nuke_cb(struct evhttp_request *req, void *arg)
             HASH_CLEAR(rh, results);
             pthread_mutex_unlock(&ns->lock);
         }        
+        safe_free(ckey);
         evhttp_send_reply(req, HTTP_OK, "OK", buf);
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "MISSING_REQ_ARG", buf);
@@ -634,10 +635,9 @@ void search_cb(struct evhttp_request *req, void *arg)
         jsobj = json_object_new_object();
         jsresults = json_object_new_array();
         ns = create_namespace(namespace, &new);
-        if (ns) {
-            ckey = make_key(locale, key, id);
+        ckey = make_key(locale, key, id);
+        if (ns && ckey) {
             pthread_mutex_lock(&ns->lock);            
-            
             if (id) {
                 HASH_SELECT(rh, results, hh, ns->elems, key_id_match);
             } else {
@@ -656,10 +656,9 @@ void search_cb(struct evhttp_request *req, void *arg)
                 json_object_array_add(jsresults, jsel);
             }
             HASH_CLEAR(rh, results);
-
             pthread_mutex_unlock(&ns->lock);
-            safe_free(ckey);
         }
+        safe_free(ckey);
         json_object_object_add(jsobj, "results", jsresults);
         evbuffer_add_printf(buf, "%s\n", (char *)json_object_to_json_string(jsobj));
         evhttp_send_reply(req, HTTP_OK, "OK", buf);

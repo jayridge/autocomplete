@@ -1,9 +1,15 @@
 LIBEVENT ?= /usr/local
 TARGET ?= /usr/local
 LIBSIMPLEHTTP ?= ../simplehttp
+UNAME := $(shell uname)
 
 CFLAGS = -I$(LIBEVENT)/include -Wall -g -O0
 LIBS = -L$(LIBEVENT)/lib -levent -lm -lpthread -ljson -licui18n -licuuc -licudata
+
+ifeq ($(UNAME), Linux)
+    LIBS += -static
+endif
+
 
 autocomplete: autocomplete.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
