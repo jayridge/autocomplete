@@ -4,7 +4,7 @@ LIBSIMPLEHTTP ?= ../simplehttp
 UNAME := $(shell uname)
 
 CFLAGS = -I$(LIBEVENT)/include -Wall -g -O0
-LIBS = -L$(LIBEVENT)/lib -levent -lm -lpthread -ljson -licui18n -licuuc -licudata
+LIBS = -L$(LIBEVENT)/lib  -ljson -licui18n -licuuc -licudata -levent -ljson -lpthread -lrt -lm -ldl -lstdc++
 
 ifeq ($(UNAME), Linux)
     LIBS += -static
