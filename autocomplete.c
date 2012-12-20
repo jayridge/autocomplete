@@ -183,7 +183,7 @@ struct namespace *create_namespace(char *namespace, int *new)
         }
         ns = malloc(sizeof(*ns));
         memset(ns, 0, sizeof(*ns));
-        ns->name = strdup(namespace);
+        ns->name = safe_strdup(namespace);
         pthread_mutex_init(&ns->lock, NULL);
         pthread_mutex_lock(&master_lock);
         HASH_ADD_KEYPTR(hh, spaces, ns->name, strlen(ns->name), ns);
@@ -328,7 +328,7 @@ struct el *put_el(char *namespace, char *locale, char *key, char *id, char *data
         e->ckey = ckey;
     }
     safe_free(e->data);
-    e->data = (data ? strdup(data) : NULL);
+    e->data = safe_strdup(data);
     e->when = when;
     HASH_ADD_KEYPTR(hh, ns->elems, e->ckey->data, KEY_LEN(e->ckey), e);
     if (mark) {
@@ -590,7 +590,6 @@ void nuke_cb(struct evhttp_request *req, void *arg)
                 HASH_DEL(ns->elems, e);  /* delete; users advances to next */
                 free_el(e);
             }
-            safe_free(ckey);
             HASH_CLEAR(rh, results);
             pthread_mutex_unlock(&ns->lock);
         }        
