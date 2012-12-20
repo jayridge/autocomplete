@@ -222,12 +222,13 @@ char *utf8_tolower(char *s, char *locale)
     UChar *buf = NULL;
     char *buf2 = NULL;
     UErrorCode err = U_ZERO_ERROR;
-    int32_t len, len2;
+    int32_t len = 0, len2 = 0;
 
     u_strFromUTF8(NULL, 0, &len, s, -1, &err);
     buf = malloc(sizeof(UChar) * len+1);
+    memset(buf, 0, sizeof(UChar) * len+1);
     err = U_ZERO_ERROR;
-    u_strFromUTF8(buf, len+1, &len, s, -1, &err);
+    u_strFromUTF8(buf, len+1, NULL, s, -1, &err);
     if (U_FAILURE(err)) {
         fprintf(stderr, "u_strFromUTF8 failed: %s: %s\n", s, u_errorName(err));
         free(buf);
@@ -237,7 +238,8 @@ char *utf8_tolower(char *s, char *locale)
     err = U_ZERO_ERROR;
     len2 = u_strToLower(NULL, 0, (UChar *)buf, -1, locale, &err);
     if (len2 > len) {
-        buf = realloc(buf, len2+1);
+        buf = realloc(buf, sizeof(UChar *) * len2+1);
+        memset(buf, 0, sizeof(UChar) * len2+1);
     }
     err = U_ZERO_ERROR;
     u_strToLower(buf, len2+1, (UChar *)buf, -1, locale, &err);
@@ -249,7 +251,8 @@ char *utf8_tolower(char *s, char *locale)
 
     err = U_ZERO_ERROR;
     u_strToUTF8(NULL, 0, &len, buf, -1, &err);
-    buf2 = malloc(sizeof(char) * len+1);
+    buf2 = malloc(sizeof(char *) * len+1);
+    memset(buf2, 0, sizeof(char *) * len+1);
     err = U_ZERO_ERROR;
     u_strToUTF8(buf2, len+1, &len, (UChar *)buf, -1, &err);
     if (U_FAILURE(err)) {
