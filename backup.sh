@@ -9,6 +9,7 @@ fi
 DBROOT=$1
 BACKUPROOT=$2
 MTIME=false
+INTERVAL="all"
 if [ "$#" -gt 2 ]; then
     MTIME=true
     INTERVAL=$3
@@ -19,9 +20,10 @@ BACKUPFILE=autocomplete.$DATESTAMP.$INTERVAL.tgz
 
 mkdir -p $BACKUPROOT
 
+set -x verbose
 if $MTIME; then
-    find $DBROOT -mtime $INTERVAL | tar -cjvf $BACKUPROOT/$BACKUPFILE
+    find -L $DBROOT -mtime $INTERVAL -print | tar -caf $BACKUPROOT/$BACKUPFILE -T -
 else
-    tar -cjvf $BACKUPROOT/$BACKUPFILE
+    find -L $DBROOT | tar -caf $BACKUPROOT/$BACKUPFILE -T -
 fi
 
